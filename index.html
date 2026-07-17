@@ -1,0 +1,1490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>JourneyLog — Travel Planner</title>
+<meta name="theme-color" content="#101828" />
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icon-192.png" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<style>
+  html, body { margin: 0; background: #101828; }
+  #boot { color: #94a0b8; font-family: system-ui, sans-serif; text-align: center; padding: 80px 20px; }
+</style>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+</head>
+<body>
+<div id="root"><div id="boot">Opening your travel desk…</div></div>
+<script>
+// Persistent storage backed by IndexedDB (no size worries for ticket images)
+const __dbp = new Promise((res, rej) => {
+  const r = indexedDB.open("journeylog", 1);
+  r.onupgradeneeded = () => r.result.createObjectStore("kv");
+  r.onsuccess = () => res(r.result);
+  r.onerror = () => rej(r.error);
+});
+function __tx(mode, fn) {
+  return __dbp.then((db) => new Promise((res, rej) => {
+    const t = db.transaction("kv", mode);
+    const req = fn(t.objectStore("kv"));
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  }));
+}
+window.storage = {
+  async get(key) {
+    const v = await __tx("readonly", (s) => s.get(key));
+    if (v === undefined) throw new Error("not found");
+    return { key, value: v };
+  },
+  async set(key, value) { await __tx("readwrite", (s) => s.put(value, key)); return { key, value }; },
+  async delete(key) { await __tx("readwrite", (s) => s.delete(key)); return { key, deleted: true }; },
+  async list(prefix) {
+    const keys = await __tx("readonly", (s) => s.getAllKeys());
+    return { keys: keys.filter((k) => !prefix || String(k).startsWith(prefix)) };
+  },
+};
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => { navigator.serviceWorker.register("sw.js").catch(() => {}); });
+}
+</script>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo } = React;
+
+const KEY = "wave-travel-planner-v1";
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+const SEED_FLAG = "seed-jul-aug-2026";
+const SEED_TRIPS = [
+  {
+    id: "seed-blr-1", name: "BLR Trip 1", destination: "Bengaluru via Ahmedabad",
+    start: "2026-07-27", end: "2026-08-05", notes: "", reminders: [], checklist: [],
+    tickets: [
+      { id: "s1a", type: "bus", title: "BHL → AHM", from: "BHL", to: "AHM", date: "2026-07-27", time: "", ref: "", seat: "", notes: "", status: "booked" },
+      { id: "s1b", type: "flight", title: "AHM → BLR", from: "AHM", to: "BLR", date: "2026-07-28", time: "", ref: "", seat: "", notes: "", status: "booked" },
+      { id: "s1c", type: "flight", title: "BLR → AHM", from: "BLR", to: "AHM", date: "2026-08-05", time: "", ref: "", seat: "", notes: "", status: "booked" },
+      { id: "s1d", type: "bus", title: "AHM → BHL", from: "AHM", to: "BHL", date: "2026-08-05", time: "", ref: "", seat: "", notes: "", status: "booked" },
+    ],
+  },
+  {
+    id: "seed-blr-2", name: "BLR Trip 2", destination: "Bengaluru via Ahmedabad",
+    start: "2026-08-11", end: "2026-08-19", notes: "", reminders: [], checklist: [],
+    tickets: [
+      { id: "s2a", type: "bus", title: "BHL → AHM", from: "BHL", to: "AHM", date: "2026-08-11", time: "", ref: "", seat: "", notes: "", status: "booked" },
+      { id: "s2b", type: "flight", title: "AHM → BLR", from: "AHM", to: "BLR", date: "2026-08-12", time: "", ref: "", seat: "", notes: "", status: "booked" },
+      { id: "s2c", type: "flight", title: "BLR → AHM", from: "BLR", to: "AHM", date: "2026-08-19", time: "", ref: "", seat: "", notes: "", status: "booked" },
+      { id: "s2d", type: "bus", title: "AHM → BHL", from: "AHM", to: "BHL", date: "2026-08-19", time: "", ref: "", seat: "", notes: "Bus booking window not open yet", status: "pending" },
+    ],
+  },
+];
+
+const TYPE_META = {
+  flight: { icon: "✈️", label: "Flight" },
+  train: { icon: "🚆", label: "Train" },
+  bus: { icon: "🚌", label: "Bus" },
+  hotel: { icon: "🏨", label: "Hotel" },
+  other: { icon: "🎫", label: "Other" },
+};
+
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function daysUntil(dateStr) {
+  if (!dateStr) return null;
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const target = new Date(y, m - 1, d);
+  const now = new Date();
+  const base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((target - base) / 86400000);
+}
+function fmtDate(dateStr) {
+  if (!dateStr) return "";
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("en-IN", {
+    day: "numeric", month: "short", year: "numeric",
+  });
+}
+function fmtTime(t) {
+  if (!t) return "";
+  const [h, min] = t.split(":").map(Number);
+  const ampm = h >= 12 ? "PM" : "AM";
+  const hr = h % 12 === 0 ? 12 : h % 12;
+  return `${hr}:${String(min).padStart(2, "0")} ${ampm}`;
+}
+function Countdown({ dateStr }) {
+  const d = daysUntil(dateStr);
+  if (d === null || d < 0) return null;
+  const text = d === 0 ? "Today" : d === 1 ? "Tomorrow" : `In ${d} days`;
+  const hot = d <= 1;
+  return <span className={"badge " + (hot ? "badge-hot" : "")}>{text}</span>;
+}
+
+function TravelPlanner() {
+  const [data, setData] = useState({ trips: [] });
+  const [loaded, setLoaded] = useState(false);
+  const [saveErr, setSaveErr] = useState(false);
+  const [screen, setScreen] = useState({ name: "home" });
+  const [modal, setModal] = useState(null); // {kind, tripId?, edit?}
+  const [viewImg, setViewImg] = useState(null); // {title, src}
+  const [calStatus, setCalStatus] = useState(null);
+
+  async function uploadTicketImage(tripId, tk, file, kind) {
+    const k = kind || "tkimg";
+    try {
+      const dataUrl = await compressImage(file);
+      const res = await window.storage.set(k + ":" + tk.id, dataUrl);
+      if (!res) throw new Error("save failed");
+      persist({ ...data, trips: data.trips.map((t) =>
+        t.id === tripId ? { ...t, tickets: t.tickets.map((x) =>
+          x.id === tk.id
+            ? (k === "bp"
+              ? { ...x, bpImg: true }
+              : { ...x, img: true, archived: true, fileRef: x.fileRef || "Saved in app" })
+            : x) } : t) });
+    } catch (e) {
+      alert("Couldn't save that image. Try a screenshot or a smaller photo.");
+    }
+  }
+  async function openTicketImage(tk, kind) {
+    const k = kind || "tkimg";
+    try {
+      const res = await window.storage.get(k + ":" + tk.id);
+      if (res && res.value) setViewImg({ title: tk.title + (k === "bp" ? " — Boarding pass" : ""), src: res.value });
+      else alert("No image found — upload it again.");
+    } catch (e) {
+      alert("No image found — upload it again.");
+    }
+  }
+  async function removeTicketImage(tripId, tk, kind) {
+    const k = kind || "tkimg";
+    try { await window.storage.delete(k + ":" + tk.id); } catch (e) { /* already gone */ }
+    persist({ ...data, trips: data.trips.map((t) =>
+      t.id === tripId ? { ...t, tickets: t.tickets.map((x) =>
+        x.id === tk.id ? (k === "bp" ? { ...x, bpImg: false } : { ...x, img: false }) : x) } : t) });
+  }
+
+  const [fareView, setFareView] = useState(null);
+  async function checkFare(tk) {
+    const url = tk.type === "flight"
+      ? "https://www.google.com/travel/flights?q=" + encodeURIComponent("Flights from " + tk.from + " to " + tk.to + " on " + tk.date)
+      : "https://www.google.com/search?q=" + encodeURIComponent("bus " + tk.from + " to " + tk.to + " " + tk.date + " fare redbus");
+    window.open(url, "_blank");
+  }
+
+  function toggleDeskWeek(tripId, ids, value) {
+    persist({ ...data, trips: data.trips.map((t) =>
+      t.id === tripId ? { ...t, officeDays: t.officeDays.map((o) => (ids.includes(o.id) ? { ...o, booked: value } : o)) } : t) });
+  }
+  function deleteOfficeDays(tripId, ids) {
+    persist({ ...data, trips: data.trips.map((t) =>
+      t.id === tripId ? { ...t, officeDays: t.officeDays.filter((o) => !ids.includes(o.id)) } : t) });
+  }
+  function addOfficeWeek(tripId, ds) {
+    if (!ds) return;
+    const mon = mondayOf(ds);
+    const days = [0, 1, 2, 3, 4].map((i) => shiftDays(mon, i)).filter((x) => !HOLIDAYS[x]);
+    persist({ ...data, trips: data.trips.map((t) => {
+      if (t.id !== tripId) return t;
+      const have = new Set((t.officeDays || []).map((o) => o.date));
+      return { ...t, officeDays: [...(t.officeDays || []), ...days.filter((x) => !have.has(x)).map((x) => ({ id: uid(), date: x, booked: false }))] };
+    }) });
+  }
+
+  function createWeekTrip(mon) {
+    const fri = shiftDays(mon, 4);
+    const cap = (ds, n) => { const w = shiftDays(ds, -n); return daysUntil(w) < 0 ? todayStr() : w; };
+    const trip = {
+      id: uid(), name: "BLR week " + fmtDate(mon), destination: "Bengaluru via Ahmedabad",
+      start: mon, end: fri, notes: "Auto-planned week — adjust dates and legs as needed.",
+      reminders: [], checklist: [],
+      officeDays: [1, 2, 3].map((i) => shiftDays(mon, i)).filter((x) => !HOLIDAYS[x]).map((x) => ({ id: uid(), date: x, booked: false })),
+      tickets: [
+        { id: uid(), type: "bus", title: "BHL → AHM", from: "BHL", to: "AHM", date: mon, time: "", ref: "", seat: "", notes: "", status: "pending", bookOpen: cap(mon, 15) },
+        { id: uid(), type: "flight", title: "AHM → BLR", from: "AHM", to: "BLR", date: shiftDays(mon, 1), time: "", ref: "", seat: "", notes: "", status: "pending", bookOpen: cap(shiftDays(mon, 1), 30) },
+        { id: uid(), type: "flight", title: "BLR → AHM", from: "BLR", to: "AHM", date: fri, time: "", ref: "", seat: "", notes: "", status: "pending", bookOpen: cap(fri, 30) },
+        { id: uid(), type: "bus", title: "AHM → BHL", from: "AHM", to: "BHL", date: fri, time: "", ref: "", seat: "", notes: "", status: "pending", bookOpen: cap(fri, 15) },
+      ],
+    };
+    persist({ ...data, trips: [...data.trips, trip] });
+  }
+
+  async function syncCalendar(events) {
+    if (!events.length) return;
+    try {
+      const esc = (s) => String(s).replace(/[\\;,]/g, " ").replace(/\n/g, " ");
+      const stamp = new Date().toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
+      const body = events.map((e) => {
+        const dt = e.date.replace(/-/g, "") + "T" + e.time.replace(":", "") + "00";
+        return ["BEGIN:VEVENT", "UID:" + e.key + "@journeylog", "DTSTAMP:" + stamp,
+          "DTSTART;TZID=Asia/Kolkata:" + dt, "DURATION:PT30M", "SUMMARY:" + esc(e.title),
+          "BEGIN:VALARM", "TRIGGER:PT0M", "ACTION:DISPLAY", "DESCRIPTION:" + esc(e.title), "END:VALARM",
+          "END:VEVENT"].join("\r\n");
+      }).join("\r\n");
+      const ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//JourneyLog//EN", body, "END:VCALENDAR"].join("\r\n");
+      const blob = new Blob([ics], { type: "text/calendar" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "journeylog-alarms.ics";
+      a.click();
+      persist({ ...data, calSynced: [...(data.calSynced || []), ...events.map((e) => e.key)] });
+      setCalStatus("done");
+    } catch (e) {
+      setCalStatus("error");
+    }
+  }
+
+  useEffect(() => {
+    (async () => {
+      let d = { trips: [] };
+      try {
+        const res = await window.storage.get(KEY);
+        if (res && res.value) d = JSON.parse(res.value);
+      } catch (e) {
+        /* first run — no data yet */
+      }
+      let seeded = false;
+      try {
+        const flag = await window.storage.get(SEED_FLAG);
+        seeded = !!flag;
+      } catch (e) {
+        seeded = false;
+      }
+      if (!seeded) {
+        const ids = new Set(d.trips.map((t) => t.id));
+        d = { ...d, trips: [...d.trips, ...SEED_TRIPS.filter((t) => !ids.has(t.id))] };
+        try {
+          await window.storage.set(KEY, JSON.stringify(d));
+          await window.storage.set(SEED_FLAG, "1");
+        } catch (e) { /* will retry next open */ }
+      }
+      // One-time fix: BHL↔AHM legs are by bus
+      let fixed = false;
+      d = { ...d, trips: d.trips.map((t) => ({ ...t, tickets: (t.tickets || []).map((tk) => {
+        if (["s1a", "s1d", "s2a", "s2d"].includes(tk.id) && tk.type !== "bus") { fixed = true; return { ...tk, type: "bus" }; }
+        return tk;
+      }) })) };
+      if (fixed) {
+        try { await window.storage.set(KEY, JSON.stringify(d)); } catch (e) { /* retry next open */ }
+      }
+      // Seed office days: in office ALL working days 28 Jul – 5 Aug
+      let officeSeeded = false;
+      try {
+        const f2 = await window.storage.get("seed-office-blr1");
+        officeSeeded = !!f2;
+      } catch (e) { officeSeeded = false; }
+      if (!officeSeeded) {
+        const OFFICE_DATES = ["2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31", "2026-08-03", "2026-08-04", "2026-08-05"];
+        d = { ...d, trips: d.trips.map((t) => {
+          if (t.id !== "seed-blr-1") return t;
+          const have = new Set((t.officeDays || []).map((o) => o.date));
+          return { ...t, officeDays: [...(t.officeDays || []), ...OFFICE_DATES.filter((x) => !have.has(x)).map((x) => ({ id: uid(), date: x, booked: false }))] };
+        }) };
+        try {
+          await window.storage.set(KEY, JSON.stringify(d));
+          await window.storage.set("seed-office-blr1", "1");
+        } catch (e) { /* retry next open */ }
+      }
+      // Seed Denmark trip (25–31 Oct 2026, via Delhi — no BLR that week) + seat preference
+      let dkSeeded = false;
+      try {
+        const f3 = await window.storage.get("seed-denmark-2026");
+        dkSeeded = !!f3;
+      } catch (e) { dkSeeded = false; }
+      if (!dkSeeded) {
+        if (!d.trips.some((t) => t.id === "seed-denmark")) {
+          d = { ...d, trips: [...d.trips, {
+            id: "seed-denmark", name: "Denmark Trip", destination: "Denmark via Delhi",
+            start: "2026-10-25", end: "2026-10-31", planOnly: true,
+            notes: "Travelling directly from Bhilwara via Delhi — NO BLR office travel this week.",
+            officeDays: [], reminders: [], checklist: [], tickets: [],
+          }] };
+        }
+        try {
+          await window.storage.set(KEY, JSON.stringify(d));
+          await window.storage.set("seed-denmark-2026", "1");
+        } catch (e) { /* retry next open */ }
+      }
+      // Denmark stays on the calendar only — no booking tracking
+      let dkFixed = false;
+      d = { ...d, trips: d.trips.map((t) => {
+        if (t.id !== "seed-denmark") return t;
+        if ((t.tickets || []).length > 0 || !t.planOnly) { dkFixed = true; return { ...t, tickets: [], planOnly: true }; }
+        return t;
+      }) };
+      if (dkFixed) {
+        try { await window.storage.set(KEY, JSON.stringify(d)); } catch (e) { /* retry next open */ }
+      }
+      if (!d.settings) d = { ...d, settings: { deskSeat: "233" } };
+      setData(d);
+      setLoaded(true);
+    })();
+  }, []);
+
+  async function persist(next) {
+    setData(next);
+    try {
+      const res = await window.storage.set(KEY, JSON.stringify(next));
+      setSaveErr(!res);
+    } catch (e) {
+      setSaveErr(true);
+    }
+  }
+
+  const trips = useMemo(
+    () => [...data.trips].sort((a, b) => (a.start || "9999").localeCompare(b.start || "9999")),
+    [data.trips]
+  );
+  const activeTrip = screen.name === "trip" ? data.trips.find((t) => t.id === screen.tripId) : null;
+
+  // ---------- Upcoming feed ----------
+  const feed = useMemo(() => {
+    const items = [];
+    for (const t of data.trips) {
+      if (t.start) items.push({ date: t.start, icon: "🧳", title: `${t.name} begins`, sub: t.destination, tripId: t.id });
+      for (const tk of t.tickets || []) {
+        if (tk.date) items.push({
+          date: tk.date, time: tk.time, icon: TYPE_META[tk.type]?.icon || "🎫",
+          title: tk.title || TYPE_META[tk.type]?.label, sub: t.name, tripId: t.id,
+        });
+      }
+      for (const r of t.reminders || []) {
+        if (r.date) items.push({ date: r.date, icon: "🔔", title: r.text, sub: t.name, tripId: t.id });
+      }
+    }
+    return items
+      .filter((i) => { const d = daysUntil(i.date); return d !== null && d >= 0; })
+      .sort((a, b) => (a.date + (a.time || "")).localeCompare(b.date + (b.time || "")))
+      .slice(0, 6);
+  }, [data.trips]);
+
+  // ---------- Mutations ----------
+  function saveTrip(form, editId) {
+    const next = { ...data };
+    if (editId) {
+      next.trips = next.trips.map((t) => (t.id === editId ? { ...t, ...form } : t));
+    } else {
+      next.trips = [...next.trips, { id: uid(), tickets: [], reminders: [], checklist: [], ...form }];
+    }
+    persist(next);
+    setModal(null);
+  }
+  function deleteTrip(id) {
+    persist({ ...data, trips: data.trips.filter((t) => t.id !== id) });
+    setScreen({ name: "home" });
+  }
+  function saveTicket(tripId, form, editId) {
+    const next = { ...data, trips: data.trips.map((t) => {
+      if (t.id !== tripId) return t;
+      const tickets = editId
+        ? t.tickets.map((tk) => (tk.id === editId ? { ...tk, ...form } : tk))
+        : [...(t.tickets || []), { id: uid(), ...form }];
+      return { ...t, tickets };
+    })};
+    persist(next);
+    setModal(null);
+  }
+  function deleteTicket(tripId, id) {
+    persist({ ...data, trips: data.trips.map((t) =>
+      t.id === tripId ? { ...t, tickets: t.tickets.filter((tk) => tk.id !== id) } : t) });
+  }
+  function saveReminder(tripId, form) {
+    persist({ ...data, trips: data.trips.map((t) =>
+      t.id === tripId ? { ...t, reminders: [...(t.reminders || []), { id: uid(), ...form }] } : t) });
+    setModal(null);
+  }
+  function deleteReminder(tripId, id) {
+    persist({ ...data, trips: data.trips.map((t) =>
+      t.id === tripId ? { ...t, reminders: t.reminders.filter((r) => r.id !== id) } : t) });
+  }
+  function addOfficeDay(tripId, date) {
+    if (!date) return;
+    persist({ ...data, trips: data.trips.map((t) =>
+      t.id === tripId ? { ...t, officeDays: [...(t.officeDays || []), { id: uid(), date, booked: false }] } : t) });
+  }
+  function toggleDesk(tripId, id) {
+    persist({ ...data, trips: data.trips.map((t) =>
+      t.id === tripId ? { ...t, officeDays: t.officeDays.map((o) => (o.id === id ? { ...o, booked: !o.booked } : o)) } : t) });
+  }
+  function deleteOfficeDay(tripId, id) {
+    persist({ ...data, trips: data.trips.map((t) =>
+      t.id === tripId ? { ...t, officeDays: t.officeDays.filter((o) => o.id !== id) } : t) });
+  }
+  function duplicateTrip(id) {
+    const t = data.trips.find((x) => x.id === id);
+    if (!t) return;
+    const copy = {
+      ...t, id: uid(), name: t.name + " (copy)",
+      start: shiftDays(t.start, 7), end: shiftDays(t.end, 7),
+      tickets: (t.tickets || []).map((tk) => ({ ...tk, id: uid(), date: shiftDays(tk.date, 7), status: "pending", archived: false, ref: "", bookOpen: "", img: false, bpImg: false })),
+      officeDays: (t.officeDays || []).map((o) => ({ ...o, id: uid(), date: shiftDays(o.date, 7), booked: false })),
+      reminders: (t.reminders || []).map((r) => ({ ...r, id: uid(), date: shiftDays(r.date, 7) })),
+      checklist: (t.checklist || []).map((c) => ({ ...c, id: uid(), done: false })),
+    };
+    persist({ ...data, trips: [...data.trips, copy] });
+    setScreen({ name: "home" });
+  }
+  function addCheckItem(tripId, text) {
+    if (!text.trim()) return;
+    persist({ ...data, trips: data.trips.map((t) =>
+      t.id === tripId ? { ...t, checklist: [...(t.checklist || []), { id: uid(), text: text.trim(), done: false }] } : t) });
+  }
+  function toggleCheck(tripId, id) {
+    persist({ ...data, trips: data.trips.map((t) =>
+      t.id === tripId ? { ...t, checklist: t.checklist.map((c) => (c.id === id ? { ...c, done: !c.done } : c)) } : t) });
+  }
+  function deleteCheck(tripId, id) {
+    persist({ ...data, trips: data.trips.map((t) =>
+      t.id === tripId ? { ...t, checklist: t.checklist.filter((c) => c.id !== id) } : t) });
+  }
+
+  if (!loaded) return <div className="app"><Style /><div className="loading">Opening your travel desk…</div></div>;
+
+  return (
+    <div className="app">
+      <Style />
+      {saveErr && <div className="save-warn">Couldn't save just now — your last change may not persist. Try again.</div>}
+
+      {screen.name === "home" && (
+        <HomeScreen
+          trips={trips} feed={feed}
+          openTrip={(id) => setScreen({ name: "trip", tripId: id, tab: "tickets" })}
+          onAddTrip={() => setModal({ kind: "trip" })}
+          calSynced={data.calSynced || []} calStatus={calStatus}
+          onSyncCalendar={(events) => syncCalendar(events)}
+          onCreateWeekTrip={(mon) => createWeekTrip(mon)}
+          deskSeat={(data.settings && data.settings.deskSeat) || "233"}
+        />
+      )}
+
+      {fareView && (
+        <div className="overlay img-overlay" onClick={() => setFareView(null)}>
+          <div className="sheet fare-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-head">
+              <h3>💹 {fareView.title}</h3>
+              <button className="x" onClick={() => setFareView(null)}>✕</button>
+            </div>
+            <p className="fare-text">{fareView.text}</p>
+            <p className="hint">Fares from a live web search — approximate. Verify on the booking site before paying.</p>
+          </div>
+        </div>
+      )}
+
+      {screen.name === "trip" && activeTrip && (
+        <TripScreen
+          trip={activeTrip} tab={screen.tab || "tickets"}
+          setTab={(tab) => setScreen({ ...screen, tab })}
+          back={() => setScreen({ name: "home" })}
+          onEdit={() => setModal({ kind: "trip", edit: activeTrip })}
+          onDelete={() => { if (confirm(`Delete "${activeTrip.name}" and everything in it?`)) deleteTrip(activeTrip.id); }}
+          onAddTicket={() => setModal({ kind: "ticket", tripId: activeTrip.id })}
+          onEditTicket={(tk) => setModal({ kind: "ticket", tripId: activeTrip.id, edit: tk })}
+          onDeleteTicket={(id) => deleteTicket(activeTrip.id, id)}
+          onAddReminder={() => setModal({ kind: "reminder", tripId: activeTrip.id })}
+          onDeleteReminder={(id) => deleteReminder(activeTrip.id, id)}
+          onAddCheck={(text) => addCheckItem(activeTrip.id, text)}
+          onToggleCheck={(id) => toggleCheck(activeTrip.id, id)}
+          onDeleteCheck={(id) => deleteCheck(activeTrip.id, id)}
+          onAddOfficeDay={(date) => addOfficeDay(activeTrip.id, date)}
+          onToggleDesk={(id) => toggleDesk(activeTrip.id, id)}
+          onDeleteOfficeDay={(id) => deleteOfficeDay(activeTrip.id, id)}
+          onDuplicate={() => { if (confirm("Copy this trip to next week? Dates shift by 7 days; tickets and desks reset to 'not booked'.")) duplicateTrip(activeTrip.id); }}
+          onUploadImage={(tk, file, kind) => uploadTicketImage(activeTrip.id, tk, file, kind)}
+          onViewImage={(tk, kind) => openTicketImage(tk, kind)}
+          onRemoveImage={(tk, kind) => { if (confirm("Remove this saved image?")) removeTicketImage(activeTrip.id, tk, kind); }}
+          onCheckFare={(tk) => checkFare(tk)}
+          onToggleDeskWeek={(ids, value) => toggleDeskWeek(activeTrip.id, ids, value)}
+          onDeleteOfficeDays={(ids) => deleteOfficeDays(activeTrip.id, ids)}
+          onAddOfficeWeek={(ds) => addOfficeWeek(activeTrip.id, ds)}
+          deskSeat={(data.settings && data.settings.deskSeat) || "233"}
+        />
+      )}
+
+      {viewImg && (
+        <div className="overlay img-overlay" onClick={() => setViewImg(null)}>
+          <div className="img-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-head">
+              <h3 className="img-title">{viewImg.title}</h3>
+              <button className="x" onClick={() => setViewImg(null)}>✕</button>
+            </div>
+            <img src={viewImg.src} alt="Ticket" className="ticket-img" />
+          </div>
+        </div>
+      )}
+
+      {modal?.kind === "trip" && (
+        <TripForm edit={modal.edit} onClose={() => setModal(null)}
+          onSave={(form) => saveTrip(form, modal.edit?.id)} />
+      )}
+      {modal?.kind === "ticket" && (
+        <TicketForm edit={modal.edit} onClose={() => setModal(null)}
+          onSave={(form) => saveTicket(modal.tripId, form, modal.edit?.id)} />
+      )}
+      {modal?.kind === "reminder" && (
+        <ReminderForm onClose={() => setModal(null)}
+          onSave={(form) => saveReminder(modal.tripId, form)} />
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Screens ---------------- */
+
+function HomeScreen({ trips, feed, openTrip, onAddTrip, calSynced, calStatus, onSyncCalendar, onCreateWeekTrip, deskSeat }) {
+  const [view, setView] = useState("list");
+  const upcoming = trips.filter((t) => !t.end || daysUntil(t.end) >= 0);
+  const past = trips.filter((t) => t.end && daysUntil(t.end) < 0);
+
+  const toBook = [];
+  const toArchive = [];
+  const desksToBook = [];
+  for (const t of trips) {
+    for (const tk of t.tickets || []) {
+      const future = !tk.date || daysUntil(tk.date) >= 0;
+      if (tk.status === "pending" && future) toBook.push({ ...tk, tripName: t.name, tripId: t.id });
+      else if (tk.status !== "pending" && !tk.archived && future) toArchive.push({ ...tk, tripName: t.name, tripId: t.id });
+    }
+    for (const o of t.officeDays || []) {
+      if (!o.booked && daysUntil(o.date) >= 0) desksToBook.push({ ...o, tripName: t.name, tripId: t.id, open: deskWindowOpenDate(o.date) });
+    }
+  }
+  toBook.sort((a, b) => (a.bookOpen || a.date || "").localeCompare(b.bookOpen || b.date || ""));
+  toArchive.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  desksToBook.sort((a, b) => a.open.localeCompare(b.open) || a.date.localeCompare(b.date));
+
+  // Alarm events for Google Calendar: one per desk window + one per pending ticket
+  const calEvents = [];
+  const winMap = new Map();
+  for (const o of desksToBook) {
+    if (!winMap.has(o.open)) winMap.set(o.open, []);
+    winMap.get(o.open).push(o.date);
+  }
+  for (const [open, dates] of winMap) {
+    const key = "desk:" + open;
+    if (!calSynced.includes(key) && daysUntil(open) >= 0) {
+      calEvents.push({ key, title: `🪑 Desk window opens at 12 tonight — book seat ${deskSeat} for ${dates.map((x) => fmtDate(x)).join(", ")}`, date: open, time: "21:00" });
+    }
+  }
+  for (const tk of toBook) {
+    const key = "ticket:" + tk.id;
+    const evDate = tk.bookOpen || shiftDays(tk.date, -5);
+    if (!calSynced.includes(key) && daysUntil(evDate) >= 0) {
+      calEvents.push({ key, title: `🎫 Book ${tk.title} ticket (travel on ${fmtDate(tk.date)})`, date: evDate, time: "09:00" });
+    }
+  }
+
+  // Week-grouped desk alerts
+  const deskWeeks = new Map();
+  for (const o of desksToBook) {
+    const wk = o.tripId + "|" + mondayOf(o.date);
+    if (!deskWeeks.has(wk)) deskWeeks.set(wk, { mon: mondayOf(o.date), open: o.open, tripName: o.tripName, tripId: o.tripId, days: [] });
+    deskWeeks.get(wk).days.push(o.date);
+  }
+  const deskWeekRows = [...deskWeeks.values()].sort((a, b) => a.open.localeCompare(b.open));
+
+  return (
+    <>
+      <header className="masthead">
+        <div className="eyebrow">Your travel desk</div>
+        <h1>Journey<span className="accent">Log</span></h1>
+      </header>
+
+      <nav className="tabs">
+        <button className={"tab" + (view === "list" ? " on" : "")} onClick={() => setView("list")}>🧳 Trips</button>
+        <button className={"tab" + (view === "calendar" ? " on" : "")} onClick={() => setView("calendar")}>📅 Calendar</button>
+        <button className={"tab" + (view === "plan" ? " on" : "")} onClick={() => setView("plan")}>🗓️ Plan</button>
+      </nav>
+
+      {view === "calendar" && <CalendarView trips={trips} openTrip={openTrip} />}
+
+      {view === "plan" && <PlanView trips={trips} openTrip={openTrip} onCreateWeekTrip={onCreateWeekTrip} />}
+
+      {view === "list" && calEvents.length > 0 && (
+        <section>
+          <button className="btn-accent full" disabled={calStatus === "working"} onClick={() => onSyncCalendar(calEvents)}>
+            {`🔔 Download ${calEvents.length} alarm${calEvents.length > 1 ? "s" : ""} for Google Calendar`}
+          </button>
+          {calStatus === "done" && <p className="hint">✓ Alarm file downloaded — open it once and the events (with notifications) are added to your calendar.</p>}
+          {calStatus === "error" && <p className="hint">Couldn't create the alarm file — please try again.</p>}
+        </section>
+      )}
+
+      {view === "list" && (
+        <div className="panel">
+          <div className="panel-title">🪑 Desk Booking</div>
+          {deskWeekRows.length === 0 && <p className="hint">All office desks booked ✓</p>}
+          {deskWeekRows.map((w) => {
+            const dOpen = daysUntil(w.open);
+            return (
+              <button key={w.tripId + w.mon} className={"feed-row" + (dOpen <= 0 ? " warn-row" : "")} onClick={() => openTrip(w.tripId)}>
+                <span className="feed-icon">🪑</span>
+                <span className="feed-main">
+                  <span className="feed-title">Week of {fmtDate(w.mon)} · seat {deskSeat}</span>
+                  <span className="feed-sub">{w.days.length} day{w.days.length > 1 ? "s" : ""} · {w.tripName}{dOpen > 0 ? " · opens Fri " + fmtDate(w.open) + " night 12" : " · window open — book the full week"}</span>
+                </span>
+                {dOpen <= 0
+                  ? <span className="badge badge-hot">Book now!</span>
+                  : <span className="badge">Opens in {dOpen}d</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {view === "list" && (
+        <div className="panel">
+          <div className="panel-title">🎫 Travel Booking — Upcoming</div>
+          {toBook.length === 0 && toArchive.length === 0 && feed.length === 0 && <p className="hint">Nothing pending ✓</p>}
+          {toBook.length > 0 && <div className="section-label">⏳ To book</div>}
+          {toBook.map((tk) => {
+            const windowOpen = tk.bookOpen && daysUntil(tk.bookOpen) <= 0;
+            return (
+              <button key={tk.id} className="feed-row warn-row" onClick={() => openTrip(tk.tripId)}>
+                <span className="feed-icon">{TYPE_META[tk.type]?.icon || "🎫"}</span>
+                <span className="feed-main">
+                  <span className="feed-title">{tk.title}</span>
+                  <span className="feed-sub">{tk.tripName} · travel {fmtDate(tk.date)}{tk.bookOpen && !windowOpen ? " · window opens " + fmtDate(tk.bookOpen) : ""}</span>
+                </span>
+                {windowOpen
+                  ? <span className="badge badge-hot">Book now!</span>
+                  : tk.bookOpen
+                    ? <span className="badge">Opens in {daysUntil(tk.bookOpen)}d</span>
+                    : <Countdown dateStr={tk.date} />}
+              </button>
+            );
+          })}
+          {toArchive.length > 0 && <div className="section-label" style={{ marginTop: 12 }}>📎 Ticket copies to save</div>}
+          {toArchive.map((tk) => (
+            <button key={tk.id} className="feed-row" onClick={() => openTrip(tk.tripId)}>
+              <span className="feed-icon">{TYPE_META[tk.type]?.icon || "🎫"}</span>
+              <span className="feed-main">
+                <span className="feed-title">{tk.title}</span>
+                <span className="feed-sub">{tk.tripName} · {fmtDate(tk.date)}</span>
+              </span>
+              <span className="badge badge-amber">📎 No copy</span>
+            </button>
+          ))}
+          {feed.length > 0 && <div className="section-label" style={{ marginTop: 12 }}>Coming up</div>}
+          {feed.map((f, i) => (
+            <button key={i} className="feed-row" onClick={() => openTrip(f.tripId)}>
+              <span className="feed-icon">{f.icon}</span>
+              <span className="feed-main">
+                <span className="feed-title">{f.title}</span>
+                <span className="feed-sub">{f.sub} · {fmtDate(f.date)}{f.time ? " · " + fmtTime(f.time) : ""}</span>
+              </span>
+              <Countdown dateStr={f.date} />
+            </button>
+          ))}
+        </div>
+      )}
+
+      {view === "list" && (
+      <section>
+        <div className="section-row">
+          <div className="section-label">Trips</div>
+          <button className="btn-accent" onClick={onAddTrip}>+ New trip</button>
+        </div>
+        {trips.length === 0 && (
+          <div className="empty">
+            <div className="empty-icon">🗺️</div>
+            <p>No trips yet. Create your first trip to start saving tickets and reminders.</p>
+          </div>
+        )}
+        {upcoming.map((t) => <TripCard key={t.id} trip={t} onClick={() => openTrip(t.id)} />)}
+        {past.length > 0 && (
+          <>
+            <div className="section-label" style={{ marginTop: 20 }}>Past trips</div>
+            {past.map((t) => <TripCard key={t.id} trip={t} onClick={() => openTrip(t.id)} muted />)}
+          </>
+        )}
+      </section>
+      )}
+    </>
+  );
+}
+
+function parseDate(s) {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function dsOf(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// Office desk window: opens Friday night 12, for the week after next.
+// e.g. Fri 17 Jul night opens Mon 27 – Fri 31 Jul.
+function deskWindowOpenDate(dateStr) {
+  const d = parseDate(dateStr);
+  const monday = new Date(d.getFullYear(), d.getMonth(), d.getDate() - ((d.getDay() + 6) % 7));
+  return dsOf(new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() - 10));
+}
+
+function shiftDays(dateStr, n) {
+  if (!dateStr) return dateStr;
+  const d = parseDate(dateStr);
+  return dsOf(new Date(d.getFullYear(), d.getMonth(), d.getDate() + n));
+}
+
+const HOLIDAYS = {
+  "2026-08-26": "Office holiday",
+  "2026-08-28": "Office holiday",
+  "2026-09-14": "Office holiday",
+  "2026-10-02": "Office holiday",
+  "2026-11-10": "Office holiday",
+  "2026-12-25": "Office holiday",
+};
+
+function mondayOf(ds) {
+  const d = parseDate(ds);
+  return dsOf(new Date(d.getFullYear(), d.getMonth(), d.getDate() - ((d.getDay() + 6) % 7)));
+}
+
+function readFileAsDataURL(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = () => rej(new Error("read failed"));
+    r.readAsDataURL(file);
+  });
+}
+
+async function compressImage(file) {
+  const src = await readFileAsDataURL(file);
+  const img = await new Promise((res, rej) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = () => rej(new Error("not an image"));
+    i.src = src;
+  });
+  const maxDim = 2000;
+  const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(img.width * scale);
+  c.height = Math.round(img.height * scale);
+  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", 0.85);
+}
+
+function CalendarView({ trips, openTrip }) {
+  const now = new Date();
+  const [cur, setCur] = useState({ y: now.getFullYear(), m: now.getMonth() });
+  const [sel, setSel] = useState(todayStr());
+
+  const dayInfo = useMemo(() => {
+    const map = {};
+    const ensure = (ds) => (map[ds] = map[ds] || { trips: [], tickets: [], reminders: [], desks: [] });
+    for (const t of trips) {
+      if (t.start) {
+        let d = parseDate(t.start);
+        const e = parseDate(t.end || t.start);
+        let guard = 0;
+        while (d <= e && guard < 370) {
+          ensure(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`).trips.push(t);
+          d = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
+          guard++;
+        }
+      }
+      for (const tk of t.tickets || []) {
+        if (tk.date) ensure(tk.date).tickets.push({ ...tk, tripName: t.name, tripId: t.id });
+      }
+      for (const r of t.reminders || []) {
+        if (r.date) ensure(r.date).reminders.push({ ...r, tripName: t.name, tripId: t.id });
+      }
+      for (const o of t.officeDays || []) {
+        if (o.date) ensure(o.date).desks.push({ ...o, tripName: t.name, tripId: t.id });
+      }
+    }
+    return map;
+  }, [trips]);
+
+  const first = new Date(cur.y, cur.m, 1);
+  const offset = first.getDay();
+  const nDays = new Date(cur.y, cur.m + 1, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < offset; i++) cells.push(null);
+  for (let d = 1; d <= nDays; d++) cells.push(d);
+  const monthName = first.toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+
+  const selInfo = dayInfo[sel];
+  const selTickets = selInfo?.tickets || [];
+  const selReminders = selInfo?.reminders || [];
+  const selTrips = selInfo?.trips || [];
+
+  return (
+    <section>
+      <div className="cal-head">
+        <button className="btn-ghost arrow" onClick={() => setCur((c) => (c.m === 0 ? { y: c.y - 1, m: 11 } : { y: c.y, m: c.m - 1 }))}>‹</button>
+        <div className="cal-month">{monthName}</div>
+        <button className="btn-ghost arrow" onClick={() => setCur((c) => (c.m === 11 ? { y: c.y + 1, m: 0 } : { y: c.y, m: c.m + 1 }))}>›</button>
+      </div>
+
+      <div className="cal-grid">
+        {["S", "M", "T", "W", "T", "F", "S"].map((w, i) => <div key={"w" + i} className="cal-wd">{w}</div>)}
+        {cells.map((d, i) => {
+          if (d === null) return <div key={"e" + i} />;
+          const ds = `${cur.y}-${String(cur.m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+          const info = dayInfo[ds];
+          const dayTk = info?.tickets || [];
+          const desks = info?.desks || [];
+          const inTrip = (info?.trips.length || 0) > 0;
+          const travelDay = (info?.trips || []).some((t) => !t.planOnly && (ds === t.start || ds === (t.end || t.start)));
+          const bookedTks = dayTk.filter((tk) => tk.status !== "pending");
+          const hasPending = dayTk.some((tk) => tk.status === "pending")
+            || desks.some((o) => !o.booked)
+            || (travelDay && dayTk.length === 0);
+          const doneCount = bookedTks.length + desks.filter((o) => o.booked).length;
+          const unarchived = bookedTks.some((tk) => !tk.archived);
+          const hasRem = (info?.reminders.length || 0) > 0;
+          const isHol = !!HOLIDAYS[ds];
+          const icons = [...new Set([...(isHol ? ["🎉"] : []), ...dayTk.map((tk) => TYPE_META[tk.type]?.icon || "🎫"), ...(desks.length ? ["🪑"] : [])])].slice(0, 2);
+          return (
+            <button key={ds}
+              className={"cal-day" + (inTrip ? " in-trip" : "") + (isHol ? " holiday" : "") + (ds === todayStr() ? " today" : "") + (ds === sel ? " sel" : "")}
+              onClick={() => setSel(ds)}>
+              <span>{d}</span>
+              <span className="cal-icons">{icons.join("")}</span>
+              <span className="cal-dots">
+                {hasPending && <i className="dot pending" />}
+                {doneCount > 0 && <i className={"dot " + (unarchived ? "booked" : "saved")} />}
+                {hasRem && <i className="dot rem" />}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="cal-legend">
+        <span>✈️🚌 Travel · 🪑 Office · 🎉 Holiday</span>
+        <span><i className="dot saved" /> Booked + copy saved</span>
+        <span><i className="dot booked" /> Booked, copy NOT saved</span>
+        <span><i className="dot pending" /> Not booked yet</span>
+        <span><i className="dot rem" /> Reminder</span>
+      </div>
+
+      <div className="cal-detail">
+        <div className="section-label">{fmtDate(sel)}</div>
+        {HOLIDAYS[sel] && (
+          <div className="feed-row static holiday-row">
+            <span className="feed-icon">🎉</span>
+            <span className="feed-main">
+              <span className="feed-title">{HOLIDAYS[sel]}</span>
+              <span className="feed-sub">Avoid being in Bengaluru — plan travel around this or take WFH</span>
+            </span>
+          </div>
+        )}
+        {!selInfo && !HOLIDAYS[sel] && <div className="empty"><p>Nothing planned on this day.</p></div>}
+        {selTickets.map((tk) => (
+          <button key={tk.id} className="feed-row" onClick={() => openTrip(tk.tripId)}>
+            <span className="feed-icon">{TYPE_META[tk.type]?.icon || "🎫"}</span>
+            <span className="feed-main">
+              <span className="feed-title">{tk.title}</span>
+              <span className="feed-sub">{tk.tripName}{tk.time ? " · " + fmtTime(tk.time) : ""}{tk.ref ? " · " + tk.ref : ""}</span>
+            </span>
+            {tk.status === "pending"
+              ? <span className="badge badge-warn">Not booked</span>
+              : tk.archived
+                ? <span className="badge badge-ok">📎 Saved</span>
+                : <span className="badge badge-amber">📎 No copy</span>}
+          </button>
+        ))}
+        {selReminders.map((r) => (
+          <button key={r.id} className="feed-row" onClick={() => openTrip(r.tripId)}>
+            <span className="feed-icon">🔔</span>
+            <span className="feed-main">
+              <span className="feed-title">{r.text}</span>
+              <span className="feed-sub">{r.tripName}</span>
+            </span>
+          </button>
+        ))}
+        {(selInfo?.desks || []).map((o) => {
+          const dOpen = daysUntil(deskWindowOpenDate(o.date));
+          return (
+            <button key={o.id} className="feed-row" onClick={() => openTrip(o.tripId)}>
+              <span className="feed-icon">🪑</span>
+              <span className="feed-main">
+                <span className="feed-title">Office day</span>
+                <span className="feed-sub">{o.tripName}{!o.booked && dOpen > 0 ? " · window opens " + fmtDate(deskWindowOpenDate(o.date)) : ""}</span>
+              </span>
+              {o.booked
+                ? <span className="badge badge-ok">Desk booked</span>
+                : dOpen <= 0
+                  ? <span className="badge badge-hot">Book desk now!</span>
+                  : <span className="badge badge-warn">Desk pending</span>}
+            </button>
+          );
+        })}
+        {selTrips.map((t) => {
+          const bookedHere = selTickets.some((tk) => tk.tripId === t.id);
+          const travelDay = !t.planOnly && (sel === t.start || sel === (t.end || t.start));
+          return (
+            <button key={t.id} className="feed-row" onClick={() => openTrip(t.id)}>
+              <span className="feed-icon">🧳</span>
+              <span className="feed-main">
+                <span className="feed-title">{t.name}</span>
+                <span className="feed-sub">{t.destination || "Trip day"}</span>
+              </span>
+              {!bookedHere && travelDay && <span className="badge badge-warn">No ticket yet</span>}
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function PlanView({ trips, openTrip, onCreateWeekTrip }) {
+  const startMon = mondayOf(todayStr());
+  const weeks = [];
+  for (let i = 0; i < 20; i++) {
+    const mon = shiftDays(startMon, i * 7);
+    const fri = shiftDays(mon, 4);
+    const weekDates = [0, 1, 2, 3, 4].map((n) => shiftDays(mon, n));
+    const hols = weekDates.filter((x) => HOLIDAYS[x]);
+    const trip = trips.find((t) => t.start && (t.end || t.start) >= mon && t.start <= fri);
+    const nearHol = !hols.length && Object.keys(HOLIDAYS).some((h) => Math.abs(daysUntil(h) - daysUntil(mon)) <= 10);
+    weeks.push({ mon, fri, hols, trip, nearHol });
+  }
+  return (
+    <section>
+      <p className="hint" style={{ marginBottom: 12 }}>Next 20 weeks. Plan office weeks in advance so flights are booked ~1 month early (before fares rise). Weeks with holidays are flagged — consider a WFH exemption instead of being stuck in Bengaluru on a holiday.</p>
+      {weeks.map((w) => (
+        <div key={w.mon} className={"feed-row static" + (w.hols.length && !w.trip ? " warn-row" : "")}>
+          <span className="feed-icon">{w.trip ? "✅" : w.hols.length ? "🎉" : "🧳"}</span>
+          <span className="feed-main">
+            <span className="feed-title">{fmtDate(w.mon)} – {fmtDate(w.fri)}</span>
+            <span className="feed-sub">
+              {w.trip ? "Planned: " + w.trip.name
+                : w.hols.length ? `Holiday${w.hols.length > 1 ? "s" : ""} on ${w.hols.map((h) => fmtDate(h)).join(", ")} — suggest WFH exemption / skip travel`
+                : w.nearHol ? "Free — festival nearby, book flights EXTRA early if travelling"
+                : "Free — office week?"}
+            </span>
+          </span>
+          {w.trip
+            ? <button className="btn-ghost small" onClick={() => openTrip(w.trip.id)}>Open</button>
+            : !w.hols.length && <button className="btn-accent" style={{ padding: "6px 10px", fontSize: 12 }}
+                onClick={() => { if (confirm(`Plan a BLR office week for ${fmtDate(w.mon)} – ${fmtDate(w.fri)}? Creates bus + flight legs (pending) with book-by reminders, and 3 office days.`)) onCreateWeekTrip(w.mon); }}>+ Plan</button>}
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function TripCard({ trip, onClick, muted }) {
+  const nTickets = (trip.tickets || []).length;
+  return (
+    <button className={"trip-card" + (muted ? " muted" : "")} onClick={onClick}>
+      <div className="trip-card-top">
+        <span className="trip-name">{trip.name}</span>
+        <Countdown dateStr={trip.start} />
+      </div>
+      <div className="trip-meta">
+        {trip.destination && <span>📍 {trip.destination}</span>}
+        {trip.start && <span>{fmtDate(trip.start)}{trip.end ? " → " + fmtDate(trip.end) : ""}</span>}
+        <span>{nTickets} ticket{nTickets === 1 ? "" : "s"}</span>
+      </div>
+    </button>
+  );
+}
+
+function TripScreen(p) {
+  const { trip, tab, setTab } = p;
+  const [checkText, setCheckText] = useState("");
+  const [officeDate, setOfficeDate] = useState("");
+  const tickets = [...(trip.tickets || [])].sort((a, b) => ((a.date || "") + (a.time || "")).localeCompare((b.date || "") + (b.time || "")));
+  const reminders = [...(trip.reminders || [])].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  const officeDays = [...(trip.officeDays || [])].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  const checklist = trip.checklist || [];
+  const done = checklist.filter((c) => c.done).length;
+
+  return (
+    <>
+      <header className="trip-header">
+        <button className="btn-ghost" onClick={p.back}>← Trips</button>
+        <div className="trip-header-actions">
+          <button className="btn-ghost" onClick={p.onDuplicate}>Duplicate</button>
+          <button className="btn-ghost" onClick={p.onEdit}>Edit</button>
+          <button className="btn-ghost danger" onClick={p.onDelete}>Delete</button>
+        </div>
+      </header>
+      <div className="trip-hero">
+        <h2>{trip.name}</h2>
+        <div className="trip-meta">
+          {trip.destination && <span>📍 {trip.destination}</span>}
+          {trip.start && <span>{fmtDate(trip.start)}{trip.end ? " → " + fmtDate(trip.end) : ""}</span>}
+        </div>
+        {trip.notes && <p className="trip-notes">{trip.notes}</p>}
+      </div>
+
+      <nav className="tabs">
+        {[["tickets", `Tickets (${tickets.length})`], ["desk", `🪑 Desk (${officeDays.length})`], ["reminders", `Alerts (${reminders.length})`], ["packing", `Pack ${checklist.length ? `(${done}/${checklist.length})` : ""}`]].map(([id, label]) => (
+          <button key={id} className={"tab" + (tab === id ? " on" : "")} onClick={() => setTab(id)}>{label}</button>
+        ))}
+      </nav>
+
+      {tab === "tickets" && (
+        <section>
+          <button className="btn-accent full" onClick={p.onAddTicket}>+ Add ticket</button>
+          {tickets.length === 0 && <div className="empty"><div className="empty-icon">🎫</div><p>Save your flight, train, bus and hotel bookings here — PNR, seat, timings — so everything's in one place.</p></div>}
+          {tickets.map((tk) => (
+            <Ticket key={tk.id} tk={tk} onEdit={() => p.onEditTicket(tk)}
+              onUpload={(file, kind) => p.onUploadImage(tk, file, kind)}
+              onView={(kind) => p.onViewImage(tk, kind)}
+              onRemoveImg={(kind) => p.onRemoveImage(tk, kind)}
+              onCheckFare={() => p.onCheckFare(tk)}
+              onDelete={() => { if (confirm("Delete this ticket?")) p.onDeleteTicket(tk.id); }} />
+          ))}
+        </section>
+      )}
+
+      {tab === "desk" && (
+        <section>
+          <div className="check-add">
+            <input type="date" value={officeDate} onChange={(e) => setOfficeDate(e.target.value)} />
+            <button className="btn-accent" onClick={() => { p.onAddOfficeWeek(officeDate); setOfficeDate(""); }}>+ Add week</button>
+          </div>
+          <p className="hint" style={{ marginBottom: 10 }}>Pick any date — the whole working week (Mon–Fri, minus holidays) is added. You book desks for the full week together; preferred seat <b>{p.deskSeat}</b>.</p>
+          {officeDays.length === 0 && <div className="empty"><div className="empty-icon">🪑</div><p>Add your office weeks. For each, I'll compute when the desk window opens (Friday night 12, for the week after next) and alert you to book seat {p.deskSeat}.</p></div>}
+          {(() => {
+            const wkMap = new Map();
+            for (const o of officeDays) {
+              const mon = mondayOf(o.date);
+              if (!wkMap.has(mon)) wkMap.set(mon, []);
+              wkMap.get(mon).push(o);
+            }
+            return [...wkMap.entries()].map(([mon, days]) => {
+              const allBooked = days.every((o) => o.booked);
+              const open = deskWindowOpenDate(days[0].date);
+              const dOpen = daysUntil(open);
+              const dayNames = days.map((o) => parseDate(o.date).toLocaleDateString("en-IN", { weekday: "short", day: "numeric" })).join(", ");
+              return (
+                <div key={mon} className={"feed-row static" + (!allBooked ? " warn-row" : "")}>
+                  <span className="feed-icon">🪑</span>
+                  <span className="feed-main">
+                    <span className="feed-title">Week of {fmtDate(mon)} · seat {p.deskSeat}</span>
+                    <span className="feed-sub">{dayNames}</span>
+                    <span className="feed-sub">{allBooked ? "Desks booked ✓" : dOpen <= 0 ? "Window OPEN — book the whole week now!" : `Window opens Fri ${fmtDate(open)} night 12`}</span>
+                  </span>
+                  {!allBooked && dOpen > 0 && <span className="badge">Opens in {dOpen}d</span>}
+                  {!allBooked && dOpen <= 0 && <span className="badge badge-hot">Book now!</span>}
+                  <button className={"checkbox" + (allBooked ? " done" : "")} onClick={() => p.onToggleDeskWeek(days.map((o) => o.id), !allBooked)}>{allBooked ? "✓" : ""}</button>
+                  <button className="x" onClick={() => { if (confirm("Remove this office week?")) p.onDeleteOfficeDays(days.map((o) => o.id)); }}>✕</button>
+                </div>
+              );
+            });
+          })()}
+          {officeDays.length > 0 && <p className="hint">Tick the box once you've booked the whole week's desks in the office system.</p>}
+        </section>
+      )}
+
+      {tab === "reminders" && (
+        <section>
+          <button className="btn-accent full" onClick={p.onAddReminder}>+ Add reminder</button>
+          {reminders.length === 0 && <div className="empty"><div className="empty-icon">🔔</div><p>Add things like "Web check-in opens", "Carry passport photocopy", "Confirm hotel". They appear on your home feed with a countdown.</p></div>}
+          {reminders.map((r) => (
+            <div key={r.id} className="feed-row static">
+              <span className="feed-icon">🔔</span>
+              <span className="feed-main">
+                <span className="feed-title">{r.text}</span>
+                <span className="feed-sub">{fmtDate(r.date)}</span>
+              </span>
+              <Countdown dateStr={r.date} />
+              <button className="x" onClick={() => p.onDeleteReminder(r.id)}>✕</button>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {tab === "packing" && (
+        <section>
+          <div className="check-add">
+            <input value={checkText} placeholder="Add item — e.g. charger, medicines" onChange={(e) => setCheckText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { p.onAddCheck(checkText); setCheckText(""); } }} />
+            <button className="btn-accent" onClick={() => { p.onAddCheck(checkText); setCheckText(""); }}>Add</button>
+          </div>
+          {checklist.map((c) => (
+            <div key={c.id} className="check-row">
+              <button className={"checkbox" + (c.done ? " done" : "")} onClick={() => p.onToggleCheck(c.id)}>{c.done ? "✓" : ""}</button>
+              <span className={"check-text" + (c.done ? " done" : "")}>{c.text}</span>
+              <button className="x" onClick={() => p.onDeleteCheck(c.id)}>✕</button>
+            </div>
+          ))}
+        </section>
+      )}
+    </>
+  );
+}
+
+function Ticket({ tk, onEdit, onDelete, onUpload, onView, onRemoveImg, onCheckFare }) {
+  const meta = TYPE_META[tk.type] || TYPE_META.other;
+  const fileBtn = (kind, has, labelUp, labelView) => has ? (
+    <span className="file-pair">
+      <button className="btn-view" onClick={() => onView(kind)}>{labelView}</button>
+      <button className="btn-ghost small" style={{ color: "#8a8474" }} onClick={() => onRemoveImg(kind)}>✕</button>
+    </span>
+  ) : (
+    <label className="btn-upload">
+      {labelUp}
+      <input type="file" accept="image/*" style={{ display: "none" }}
+        onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) onUpload(f, kind); e.target.value = ""; }} />
+    </label>
+  );
+  return (
+    <div className="ticket">
+      <div className="ticket-stub">
+        <span className="ticket-icon">{meta.icon}</span>
+        <span className="ticket-type">{meta.label}</span>
+      </div>
+      <div className="ticket-body">
+        <div className="ticket-title">{tk.title || meta.label}</div>
+        {(tk.from || tk.to) && <div className="ticket-route">{tk.from}{tk.from && tk.to ? " → " : ""}{tk.to}</div>}
+        <div className="ticket-grid">
+          {tk.date && <div><label>Date</label><span>{fmtDate(tk.date)}</span></div>}
+          {tk.time && <div><label>Time</label><span>{fmtTime(tk.time)}</span></div>}
+          {tk.ref && <div><label>PNR / Ref</label><span>{tk.ref}</span></div>}
+          {tk.seat && <div><label>Seat / Room</label><span>{tk.seat}</span></div>}
+          {tk.fileRef && <div><label>Copy saved at</label><span>{tk.fileRef}</span></div>}
+        </div>
+        {tk.notes && <div className="ticket-notes">{tk.notes}</div>}
+        <div className="ticket-file">
+          {fileBtn("tkimg", tk.img, "📎 Upload ticket", "🎫 View ticket")}
+          {tk.type === "flight" && fileBtn("bp", tk.bpImg, "🛂 Upload boarding pass", "🛂 Boarding pass")}
+          {tk.status === "pending" && <button className="btn-upload" onClick={onCheckFare}>💹 Check fares</button>}
+        </div>
+        <div className="ticket-actions">
+          {tk.status === "pending" && <span className="badge badge-warn">Not booked yet</span>}
+          {tk.status !== "pending" && (tk.archived
+            ? <span className="badge badge-ok">📎 Saved</span>
+            : <span className="badge badge-amber">📎 No copy</span>)}
+          <Countdown dateStr={tk.date} />
+          <span className="spacer" />
+          <button className="btn-ghost small" onClick={onEdit}>Edit</button>
+          <button className="btn-ghost small danger" onClick={onDelete}>Delete</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Forms ---------------- */
+
+function Modal({ title, children, onClose }) {
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-head">
+          <h3>{title}</h3>
+          <button className="x" onClick={onClose}>✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function TripForm({ edit, onSave, onClose }) {
+  const [f, setF] = useState({ name: edit?.name || "", destination: edit?.destination || "", start: edit?.start || "", end: edit?.end || "", notes: edit?.notes || "" });
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  return (
+    <Modal title={edit ? "Edit trip" : "New trip"} onClose={onClose}>
+      <label className="fl">Trip name *</label>
+      <input value={f.name} onChange={set("name")} placeholder="e.g. Mumbai client visit" />
+      <label className="fl">Destination</label>
+      <input value={f.destination} onChange={set("destination")} placeholder="City / country" />
+      <div className="two">
+        <div><label className="fl">Start date</label><input type="date" value={f.start} onChange={set("start")} /></div>
+        <div><label className="fl">End date</label><input type="date" value={f.end} onChange={set("end")} /></div>
+      </div>
+      <label className="fl">Notes</label>
+      <textarea rows={2} value={f.notes} onChange={set("notes")} placeholder="Purpose, addresses, contacts…" />
+      <button className="btn-accent full" disabled={!f.name.trim()} onClick={() => onSave(f)}>
+        {edit ? "Save changes" : "Create trip"}
+      </button>
+    </Modal>
+  );
+}
+
+function TicketForm({ edit, onSave, onClose }) {
+  const [f, setF] = useState({
+    type: edit?.type || "flight", title: edit?.title || "", from: edit?.from || "", to: edit?.to || "",
+    date: edit?.date || todayStr(), time: edit?.time || "", ref: edit?.ref || "", seat: edit?.seat || "", notes: edit?.notes || "",
+    status: edit?.status || "booked", bookOpen: edit?.bookOpen || "", archived: edit?.archived || false, fileRef: edit?.fileRef || "",
+  });
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const isHotel = f.type === "hotel";
+  return (
+    <Modal title={edit ? "Edit ticket" : "Add ticket"} onClose={onClose}>
+      <div className="type-picker">
+        {Object.entries(TYPE_META).map(([id, m]) => (
+          <button key={id} className={"type-chip" + (f.type === id ? " on" : "")} onClick={() => setF({ ...f, type: id })}>
+            {m.icon} {m.label}
+          </button>
+        ))}
+      </div>
+      <label className="fl">Title *</label>
+      <input value={f.title} onChange={set("title")} placeholder={isHotel ? "Hotel name" : "e.g. IndiGo 6E-302 or 12955 Jan Shatabdi"} />
+      {!isHotel && (
+        <div className="two">
+          <div><label className="fl">From</label><input value={f.from} onChange={set("from")} placeholder="Origin" /></div>
+          <div><label className="fl">To</label><input value={f.to} onChange={set("to")} placeholder="Destination" /></div>
+        </div>
+      )}
+      <div className="two">
+        <div><label className="fl">{isHotel ? "Check-in date" : "Date"}</label><input type="date" value={f.date} onChange={set("date")} /></div>
+        <div><label className="fl">{isHotel ? "Check-in time" : "Departure time"}</label><input type="time" value={f.time} onChange={set("time")} /></div>
+      </div>
+      <div className="two">
+        <div><label className="fl">PNR / Booking ref</label><input value={f.ref} onChange={set("ref")} placeholder="e.g. ABC123" /></div>
+        <div><label className="fl">{isHotel ? "Room" : "Seat / Coach"}</label><input value={f.seat} onChange={set("seat")} placeholder={isHotel ? "e.g. 204" : "e.g. 14A / B2-32"} /></div>
+      </div>
+      <label className="fl">Booking status</label>
+      <div className="type-picker">
+        <button className={"type-chip" + (f.status !== "pending" ? " on" : "")} onClick={() => setF({ ...f, status: "booked" })}>✓ Booked</button>
+        <button className={"type-chip" + (f.status === "pending" ? " on" : "")} onClick={() => setF({ ...f, status: "pending" })}>⏳ Not booked yet</button>
+      </div>
+      {f.status === "pending" && (
+        <>
+          <label className="fl">Booking window opens on (optional)</label>
+          <input type="date" value={f.bookOpen} onChange={set("bookOpen")} />
+          <p className="hint">This ticket stays in the "To book" list on your home screen. On this date it turns into a red "Book now!" alert.</p>
+        </>
+      )}
+      {f.status !== "pending" && (
+        <>
+          <label className="fl">Ticket copy saved? (screenshot / PDF / email)</label>
+          <div className="type-picker">
+            <button className={"type-chip" + (f.archived ? " on" : "")} onClick={() => setF({ ...f, archived: true })}>📎 Copy saved</button>
+            <button className={"type-chip" + (!f.archived ? " on" : "")} onClick={() => setF({ ...f, archived: false })}>Not saved yet</button>
+          </div>
+          {f.archived && (
+            <>
+              <label className="fl">Where is it saved?</label>
+              <input value={f.fileRef} onChange={set("fileRef")} placeholder="e.g. Google Drive › Travel, Gmail, phone gallery" />
+            </>
+          )}
+        </>
+      )}
+      <label className="fl">Notes</label>
+      <textarea rows={2} value={f.notes} onChange={set("notes")} placeholder="Terminal, gate, baggage, contact number…" />
+      <button className="btn-accent full" disabled={!f.title.trim()} onClick={() => onSave(f)}>
+        {edit ? "Save changes" : "Save ticket"}
+      </button>
+    </Modal>
+  );
+}
+
+function ReminderForm({ onSave, onClose }) {
+  const [f, setF] = useState({ text: "", date: todayStr() });
+  return (
+    <Modal title="Add reminder" onClose={onClose}>
+      <label className="fl">What should I remind you about? *</label>
+      <input value={f.text} onChange={(e) => setF({ ...f, text: e.target.value })} placeholder="e.g. Web check-in opens" />
+      <label className="fl">On which date</label>
+      <input type="date" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} />
+      <p className="hint">Reminders show on your home screen with a countdown whenever you open the app.</p>
+      <button className="btn-accent full" disabled={!f.text.trim()} onClick={() => onSave(f)}>Save reminder</button>
+    </Modal>
+  );
+}
+
+/* ---------------- Styles ---------------- */
+
+function Style() {
+  return (
+    <style>{`
+      @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+      :root {
+        --bg: #101828; --card: #1a2438; --line: #27324a;
+        --text: #eef2fa; --mut: #94a0b8;
+        --accent: #f5a524; --accent-ink: #241a05;
+        --paper: #f8f4ea; --paper-ink: #23201a; --paper-mut: #6f6a5d;
+        --danger: #ff7a7a;
+      }
+      * { box-sizing: border-box; margin: 0; }
+      .app {
+        min-height: 100vh; background: var(--bg); color: var(--text);
+        font-family: 'IBM Plex Sans', system-ui, sans-serif;
+        max-width: 460px; margin: 0 auto; padding: 16px 16px 48px;
+      }
+      h1, h2, h3, .trip-name, .ticket-title { font-family: 'Space Grotesk', system-ui, sans-serif; }
+      .loading { padding: 60px 0; text-align: center; color: var(--mut); }
+      .save-warn { background: #3a2020; color: #ffb4b4; border: 1px solid #5c3030; padding: 8px 12px; border-radius: 10px; font-size: 13px; margin-bottom: 12px; }
+
+      .masthead { padding: 8px 0 18px; }
+      .eyebrow { font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--mut); margin-bottom: 4px; }
+      h1 { font-size: 30px; letter-spacing: -0.02em; }
+      .accent { color: var(--accent); }
+
+      section { margin-bottom: 26px; }
+      .section-label { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--mut); margin-bottom: 10px; }
+      .section-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+      .section-row .section-label { margin: 0; }
+
+      .badge { font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px; background: var(--line); color: var(--mut); white-space: nowrap; }
+      .badge-hot { background: var(--accent); color: var(--accent-ink); }
+
+      .feed-row { display: flex; gap: 10px; align-items: center; width: 100%; text-align: left;
+        background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; color: var(--text); cursor: pointer; }
+      .feed-row.static { cursor: default; }
+      .feed-icon { font-size: 18px; }
+      .feed-main { flex: 1; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+      .feed-title { font-weight: 600; font-size: 14px; }
+      .feed-sub { font-size: 12px; color: var(--mut); }
+
+      .trip-card { display: block; width: 100%; text-align: left; background: var(--card); border: 1px solid var(--line);
+        border-radius: 14px; padding: 14px; margin-bottom: 10px; color: var(--text); cursor: pointer; }
+      .trip-card.muted { opacity: .55; }
+      .trip-card-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+      .trip-name { font-size: 17px; font-weight: 700; }
+      .trip-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--mut); margin-top: 6px; }
+
+      .empty { text-align: center; color: var(--mut); padding: 26px 18px; border: 1px dashed var(--line); border-radius: 14px; font-size: 14px; line-height: 1.5; }
+      .empty-icon { font-size: 28px; margin-bottom: 8px; }
+
+      .btn-accent { background: var(--accent); color: var(--accent-ink); border: none; border-radius: 10px;
+        padding: 9px 14px; font-weight: 700; font-size: 14px; cursor: pointer; font-family: inherit; }
+      .btn-accent:disabled { opacity: .4; cursor: default; }
+      .btn-accent.full { width: 100%; padding: 12px; margin-bottom: 12px; }
+      .btn-ghost { background: none; border: none; color: var(--mut); font-size: 14px; cursor: pointer; padding: 6px 8px; font-family: inherit; }
+      .btn-ghost.small { font-size: 13px; }
+      .btn-ghost.danger, .x.danger { color: var(--danger); }
+      .x { background: none; border: none; color: var(--mut); cursor: pointer; font-size: 14px; padding: 4px 6px; }
+
+      .trip-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+      .trip-header-actions { display: flex; gap: 4px; }
+      .trip-hero h2 { font-size: 24px; letter-spacing: -0.02em; }
+      .trip-hero { margin-bottom: 16px; }
+      .trip-notes { font-size: 13px; color: var(--mut); margin-top: 8px; line-height: 1.5; }
+
+      .tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+      .tab { flex: 1; background: var(--card); border: 1px solid var(--line); color: var(--mut);
+        border-radius: 10px; padding: 9px 4px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; }
+      .tab.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+      /* Boarding-pass ticket */
+      .ticket { display: flex; background: var(--paper); color: var(--paper-ink); border-radius: 14px;
+        margin-bottom: 14px; position: relative; overflow: hidden; }
+      .ticket-stub { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+        width: 74px; border-right: 2px dashed #cfc8b6; padding: 12px 6px; flex-shrink: 0; }
+      .ticket-icon { font-size: 22px; }
+      .ticket-type { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--paper-mut); font-weight: 600; }
+      .ticket::before, .ticket::after { content: ""; position: absolute; width: 16px; height: 16px; border-radius: 50%;
+        background: var(--bg); left: 66px; }
+      .ticket::before { top: -8px; } .ticket::after { bottom: -8px; }
+      .ticket-body { padding: 12px 14px; flex: 1; min-width: 0; }
+      .ticket-title { font-size: 15px; font-weight: 700; }
+      .ticket-route { font-size: 13px; color: var(--paper-mut); margin-top: 2px; font-weight: 600; }
+      .ticket-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin-top: 10px; }
+      .ticket-grid label { display: block; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--paper-mut); }
+      .ticket-grid span { font-size: 13px; font-weight: 600; }
+      .ticket-notes { font-size: 12px; color: var(--paper-mut); margin-top: 10px; line-height: 1.4; }
+      .ticket-actions { display: flex; align-items: center; gap: 4px; margin-top: 10px; }
+      .ticket-actions .badge { background: #e9e2d0; color: #7a6a3a; }
+      .ticket-actions .badge-hot { background: var(--accent); color: var(--accent-ink); }
+      .ticket-actions .btn-ghost { color: var(--paper-mut); }
+      .ticket-actions .btn-ghost.danger { color: #b23b3b; }
+      .spacer { flex: 1; }
+
+      .check-add { display: flex; gap: 8px; margin-bottom: 12px; }
+      .check-add input { flex: 1; }
+      .check-add .btn-accent { flex-shrink: 0; }
+      .check-row { display: flex; align-items: center; gap: 10px; background: var(--card); border: 1px solid var(--line);
+        border-radius: 10px; padding: 9px 12px; margin-bottom: 7px; }
+      .checkbox { width: 22px; height: 22px; border-radius: 7px; border: 2px solid var(--mut); background: none;
+        color: var(--accent-ink); font-weight: 700; cursor: pointer; flex-shrink: 0; font-size: 13px; }
+      .checkbox.done { background: var(--accent); border-color: var(--accent); }
+      .check-text { flex: 1; font-size: 14px; }
+      .check-text.done { text-decoration: line-through; color: var(--mut); }
+
+      .overlay { position: fixed; inset: 0; background: rgba(6,10,18,.72); display: flex; align-items: flex-end; justify-content: center; z-index: 50; }
+      .sheet { background: var(--card); border: 1px solid var(--line); border-radius: 18px 18px 0 0; width: 100%; max-width: 460px;
+        padding: 18px 16px 26px; max-height: 88vh; overflow-y: auto; }
+      .sheet-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+      .sheet-head h3 { font-size: 18px; }
+      .fl { display: block; font-size: 12px; color: var(--mut); margin: 10px 0 4px; font-weight: 600; }
+      input, textarea { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+        color: var(--text); padding: 10px 12px; font-size: 14px; font-family: inherit; }
+      input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+      .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      .hint { font-size: 12px; color: var(--mut); margin-top: 10px; line-height: 1.4; }
+      .type-picker { display: flex; flex-wrap: wrap; gap: 6px; }
+      .type-chip { background: var(--bg); border: 1px solid var(--line); color: var(--mut); border-radius: 999px;
+        padding: 6px 12px; font-size: 13px; cursor: pointer; font-family: inherit; }
+      .type-chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 700; }
+      /* Calendar */
+      .cal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+      .cal-head .arrow { font-size: 22px; padding: 2px 14px; color: var(--text); }
+      .cal-month { font-family: 'Space Grotesk', system-ui, sans-serif; font-weight: 700; font-size: 16px; }
+      .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+      .cal-wd { text-align: center; font-size: 11px; color: var(--mut); padding: 4px 0; font-weight: 600; }
+      .cal-day { position: relative; aspect-ratio: 1; background: var(--card); border: 1px solid var(--line);
+        border-radius: 9px; color: var(--text); font-size: 13px; cursor: pointer; display: flex;
+        flex-direction: column; align-items: center; justify-content: center; gap: 3px; font-family: inherit; padding: 0; }
+      .cal-day.in-trip { background: #223251; border-color: #33476f; }
+      .cal-day.today { font-weight: 700; }
+      .cal-day.today > span:first-child { color: var(--accent); }
+      .cal-day.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+      .cal-dots { display: flex; gap: 3px; height: 7px; align-items: center; }
+      .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+      .dot.booked { background: var(--accent); }
+      .dot.pending { background: transparent; border: 1.5px solid var(--danger); width: 5px; height: 5px; }
+      .dot.rem { background: #7fb8ff; }
+      .cal-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--mut);
+        margin: 12px 0 18px; align-items: center; }
+      .cal-legend span { display: inline-flex; align-items: center; gap: 6px; }
+      .badge-ok { background: #24402c; color: #8fe0a4; }
+      .badge-warn { background: #46282a; color: #ffb4a6; }
+      .cal-detail { margin-top: 2px; }
+
+      .cal-icons { font-size: 9px; line-height: 1; height: 10px; letter-spacing: -1px; }
+      .dot.saved { background: #58c777; }
+      .badge-amber { background: #4a3a17; color: #f2c66d; }
+      .ticket-actions .badge-amber { background: #efe0bd; color: #7a5c14; }
+      .ticket-actions .badge-warn { background: #f3d3c9; color: #a33a2a; }
+      .warn-row { border-color: #6b3a3a; }
+      .cal-day { gap: 2px; }
+
+      /* Image viewer, uploads, fares, holidays */
+      .img-overlay { align-items: center; padding: 12px; }
+      .img-sheet { background: #ffffff; border-radius: 16px; width: 100%; max-width: 460px;
+        padding: 12px 14px 14px; max-height: 92vh; overflow-y: auto; }
+      .img-sheet .sheet-head h3 { color: #1d1b16; }
+      .img-sheet .x { color: #666; }
+      .ticket-img { width: 100%; display: block; border-radius: 8px; }
+      .ticket-file { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+      .file-pair { display: inline-flex; align-items: center; gap: 2px; }
+      .btn-view { background: #23201a; color: #f8f4ea; border: none; border-radius: 8px;
+        padding: 8px 12px; font-weight: 700; font-size: 13px; cursor: pointer; font-family: inherit; }
+      .btn-upload { border: 1.5px dashed #b8b09c; background: none; color: #6f6a5d; border-radius: 8px;
+        padding: 7px 11px; font-size: 12.5px; font-weight: 600; cursor: pointer; font-family: inherit; display: inline-block; }
+      .fare-sheet { border-radius: 18px; }
+      .fare-text { font-size: 13.5px; line-height: 1.55; color: var(--text); white-space: pre-wrap; }
+      .cal-day.holiday { background: #3b2a42; border-color: #5c4168; }
+      .holiday-row { border-color: #5c4168; }
+
+      /* Home panels */
+      .panel { background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+        padding: 14px 12px 10px; margin-bottom: 16px; }
+      .panel .feed-row { background: var(--bg); }
+      .panel-title { font-family: 'Space Grotesk', system-ui, sans-serif; font-size: 16px; font-weight: 700;
+        margin-bottom: 10px; letter-spacing: -0.01em; }
+      .panel .section-label { margin-bottom: 8px; }
+      .panel .hint { margin-bottom: 8px; }
+
+      button { -webkit-tap-highlight-color: transparent; }
+      .sheet .btn-accent.full { margin-top: 16px; margin-bottom: 0; }
+      @media (prefers-reduced-motion: no-preference) {
+        .trip-card, .feed-row, .ticket { transition: transform .12s ease; }
+        .trip-card:active, .feed-row:active { transform: scale(.985); }
+      }
+    `}</style>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<TravelPlanner />);
+</script>
+</body>
+</html>
