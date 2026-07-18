@@ -1,34 +1,38 @@
-JOURNEYLOG — INSTALL AS A FREE APP ON YOUR ANDROID PHONE
-=========================================================
+AVIYATRA — COMPLETE PACKAGE (latest version)
+=============================================
+All 5 app files, ready to upload. This replaces the old
+JourneyLog v1 files in your repository completely.
 
-WHAT'S IN THIS FOLDER
-  index.html   — the whole app
-  manifest.json, sw.js, icon-192.png, icon-512.png — makes it installable + work offline
+FILES
+  index.html    - the whole app (AviYatra, journeys, planner,
+                  PDF uploads, travel background, all fixes)
+  manifest.json - app identity + WhatsApp share support
+  sw.js         - offline support + share receiver
+  icon-192.png, icon-512.png - app icons
 
-ONE-TIME SETUP (about 10 minutes, everything free)
+UPLOAD STEPS
+  1. github.com -> sign in -> open your "journeylog" repository
+  2. Click "Add file" -> "Upload files"
+  3. Drag ALL 5 app files in (not this README - optional)
+     Same filenames = they REPLACE the old versions. Good.
+  4. Click "Commit changes"
+  5. Wait 2 minutes (Actions tab shows a green tick when done)
 
-STEP 1 — Put the files online with GitHub Pages
-  1. Go to github.com and create a free account (if you don't have one)
-  2. Click "+" (top right) -> "New repository"
-     Name it: journeylog   |  keep it Public  |  click "Create repository"
-  3. On the repository page click "uploading an existing file"
-     Drag ALL 5 files from this folder in -> click "Commit changes"
-  4. Go to Settings -> Pages (left sidebar)
-     Under "Branch" choose: main, folder: / (root) -> Save
-  5. Wait 1-2 minutes. Your app is now live at:
-     https://YOUR-USERNAME.github.io/journeylog/
+PHONE STEPS (do once)
+  1. Long-press the old JourneyLog icon -> Remove
+  2. Open https://YOUR-USERNAME.github.io/journeylog/ in Chrome
+  3. If you still see the OLD look: tap the three-dot menu ->
+     the refresh icon, or Settings -> Privacy -> Clear browsing
+     data -> Cached images (last hour) -> then reload
+  4. Three-dot menu -> "Add to Home screen" / "Install app"
+  5. New AviYatra icon appears. Open it - done!
 
-STEP 2 — Install on your phone
-  1. Open that link in CHROME on your Android phone
-  2. Tap the three-dot menu -> "Add to Home screen" (or "Install app")
-  3. Done! A "JourneyLog" icon appears on your home screen.
-     It opens full-screen like a normal app and works offline.
+WHY RE-INSTALL THE ICON? Android registers the app name and
+the WhatsApp "share to app" feature only at install time.
 
-NOTES
-  - Your data (trips, tickets, images) is stored ON THIS PHONE.
-    It does not sync with the Claude version or other devices.
-  - The alarm button downloads a .ics file — open it once and all
-    reminders are added to Google Calendar with phone notifications.
-  - "Check fares" opens Google Flights / bus search directly.
-  - To update the app later: upload the new index.html to the same
-    repository, then refresh the app.
+WHATSAPP SHARING (after the above)
+  Open a ticket image/PDF in WhatsApp -> Share -> AviYatra ->
+  choose which journey leg it belongs to -> saved + marked booked.
+
+YOUR DATA: trips, tickets and uploads are stored on the phone,
+NOT in these files - updates never delete them.

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>JourneyLog — Travel Planner</title>
+<title>AviYatra — Travel Planner</title>
 <meta name="theme-color" content="#101828" />
 <link rel="manifest" href="manifest.json" />
 <link rel="icon" href="icon-192.png" />
@@ -17,7 +17,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 </head>
 <body>
-<div id="root"><div id="boot">Opening your travel desk…</div></div>
+<div id="root"><div id="boot">Opening AviYatra…</div></div>
 <script>
 // Persistent storage backed by IndexedDB (no size worries for ticket images)
 const __dbp = new Promise((res, rej) => {
@@ -131,11 +131,30 @@ function TravelPlanner() {
   const [modal, setModal] = useState(null); // {kind, tripId?, edit?}
   const [viewImg, setViewImg] = useState(null); // {title, src}
   const [calStatus, setCalStatus] = useState(null);
+  const [sharedFile, setSharedFile] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        if (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("shared") === "1") {
+          const res = await window.storage.get("__shared");
+          if (res && res.value) setSharedFile(res.value);
+          window.history.replaceState({}, "", window.location.pathname);
+        }
+      } catch (e) { /* nothing shared */ }
+    })();
+  }, []);
+
+  async function attachShared(tripId, tk) {
+    await uploadTicketImage(tripId, tk, sharedFile);
+    try { await window.storage.delete("__shared"); } catch (e) { /* fine */ }
+    setSharedFile(null);
+  }
 
   async function uploadTicketImage(tripId, tk, file, kind) {
     const k = kind || "tkimg";
     try {
-      const dataUrl = await compressImage(file);
+      const dataUrl = await fileToDataUrl(file);
       const res = await window.storage.set(k + ":" + tk.id, dataUrl);
       if (!res) throw new Error("save failed");
       persist({ ...data, trips: data.trips.map((t) =>
@@ -143,7 +162,7 @@ function TravelPlanner() {
           x.id === tk.id
             ? (k === "bp"
               ? { ...x, bpImg: true }
-              : { ...x, img: true, archived: true, fileRef: x.fileRef || "Saved in app" })
+              : { ...x, img: true, archived: true, status: "booked", fileRef: x.fileRef || "Saved in app" })
             : x) } : t) });
     } catch (e) {
       alert("Couldn't save that image. Try a screenshot or a smaller photo.");
@@ -194,22 +213,32 @@ function TravelPlanner() {
     }) });
   }
 
-  function createWeekTrip(mon) {
-    const fri = shiftDays(mon, 4);
+  function createPlannedTrip(out, back) {
+    if (!out || !back || back < out) { alert("Return date must be after the outward date."); return; }
     const cap = (ds, n) => { const w = shiftDays(ds, -n); return daysUntil(w) < 0 ? todayStr() : w; };
+    const officeDays = [];
+    let m = mondayOf(out);
+    const lastMon = mondayOf(back);
+    while (m <= lastMon) {
+      for (const off of [1, 2, 3]) {
+        const dsx = shiftDays(m, off);
+        if (dsx > out && dsx < back && !HOLIDAYS[dsx]) officeDays.push({ id: uid(), date: dsx, booked: false });
+      }
+      m = shiftDays(m, 7);
+    }
     const trip = {
-      id: uid(), name: "BLR week " + fmtDate(mon), destination: "Bengaluru via Ahmedabad",
-      start: mon, end: fri, notes: "Auto-planned week — adjust dates and legs as needed.",
-      reminders: [], checklist: [],
-      officeDays: [1, 2, 3].map((i) => shiftDays(mon, i)).filter((x) => !HOLIDAYS[x]).map((x) => ({ id: uid(), date: x, booked: false })),
+      id: uid(), name: "BLR: " + fmtDate(out) + " – " + fmtDate(back), destination: "Bengaluru via Ahmedabad",
+      start: out, end: back, notes: "Planned trip — adjust legs and office days as needed.",
+      reminders: [], checklist: [], officeDays,
       tickets: [
-        { id: uid(), type: "bus", title: "BHL → AHM", from: "BHL", to: "AHM", date: mon, time: "", ref: "", seat: "", notes: "", status: "pending", bookOpen: cap(mon, 15) },
-        { id: uid(), type: "flight", title: "AHM → BLR", from: "AHM", to: "BLR", date: shiftDays(mon, 1), time: "", ref: "", seat: "", notes: "", status: "pending", bookOpen: cap(shiftDays(mon, 1), 30) },
-        { id: uid(), type: "flight", title: "BLR → AHM", from: "BLR", to: "AHM", date: fri, time: "", ref: "", seat: "", notes: "", status: "pending", bookOpen: cap(fri, 30) },
-        { id: uid(), type: "bus", title: "AHM → BHL", from: "AHM", to: "BHL", date: fri, time: "", ref: "", seat: "", notes: "", status: "pending", bookOpen: cap(fri, 15) },
+        { id: uid(), type: "bus", title: "BHL → AHM", from: "BHL", to: "AHM", date: out, time: "", ref: "", seat: "", notes: "", status: "pending", journey: "onward", bookOpen: cap(out, 15) },
+        { id: uid(), type: "flight", title: "AHM → BLR", from: "AHM", to: "BLR", date: shiftDays(out, 1), time: "", ref: "", seat: "", notes: "", status: "pending", journey: "onward", bookOpen: cap(shiftDays(out, 1), 30) },
+        { id: uid(), type: "flight", title: "BLR → AHM", from: "BLR", to: "AHM", date: back, time: "", ref: "", seat: "", notes: "", status: "pending", journey: "return", bookOpen: cap(back, 30) },
+        { id: uid(), type: "bus", title: "AHM → BHL", from: "AHM", to: "BHL", date: back, time: "", ref: "", seat: "", notes: "", status: "pending", journey: "return", bookOpen: cap(back, 15) },
       ],
     };
     persist({ ...data, trips: [...data.trips, trip] });
+    setModal(null);
   }
 
   async function syncCalendar(events) {
@@ -219,16 +248,16 @@ function TravelPlanner() {
       const stamp = new Date().toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
       const body = events.map((e) => {
         const dt = e.date.replace(/-/g, "") + "T" + e.time.replace(":", "") + "00";
-        return ["BEGIN:VEVENT", "UID:" + e.key + "@journeylog", "DTSTAMP:" + stamp,
+        return ["BEGIN:VEVENT", "UID:" + e.key + "@aviyatra", "DTSTAMP:" + stamp,
           "DTSTART;TZID=Asia/Kolkata:" + dt, "DURATION:PT30M", "SUMMARY:" + esc(e.title),
           "BEGIN:VALARM", "TRIGGER:PT0M", "ACTION:DISPLAY", "DESCRIPTION:" + esc(e.title), "END:VALARM",
           "END:VEVENT"].join("\r\n");
       }).join("\r\n");
-      const ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//JourneyLog//EN", body, "END:VCALENDAR"].join("\r\n");
+      const ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//AviYatra//EN", body, "END:VCALENDAR"].join("\r\n");
       const blob = new Blob([ics], { type: "text/calendar" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = "journeylog-alarms.ics";
+      a.download = "aviyatra-alarms.ics";
       a.click();
       persist({ ...data, calSynced: [...(data.calSynced || []), ...events.map((e) => e.key)] });
       setCalStatus("done");
@@ -319,6 +348,28 @@ function TravelPlanner() {
         try { await window.storage.set(KEY, JSON.stringify(d)); } catch (e) { /* retry next open */ }
       }
       if (!d.settings) d = { ...d, settings: { deskSeat: "233" } };
+      // Journey grouping + friendly trip names
+      const ONWARD_IDS = ["s1a", "s1b", "s2a", "s2b"];
+      const RETURN_IDS = ["s1c", "s1d", "s2c", "s2d"];
+      let jFixed = false;
+      d = { ...d, trips: d.trips.map((t) => {
+        let name = t.name;
+        if (t.id === "seed-blr-1" && /Trip 1/i.test(name)) name = "BLR: 27 Jul – 5 Aug";
+        if (t.id === "seed-blr-2" && /Trip 2/i.test(name)) name = "BLR: 11 – 19 Aug";
+        let changed = name !== t.name;
+        const tickets = (t.tickets || []).map((tk) => {
+          if (tk.journey) return tk;
+          const j = ONWARD_IDS.includes(tk.id) ? "onward" : RETURN_IDS.includes(tk.id) ? "return" : "";
+          if (!j) return tk;
+          changed = true;
+          return { ...tk, journey: j };
+        });
+        if (changed) { jFixed = true; return { ...t, name, tickets }; }
+        return t;
+      }) };
+      if (jFixed) {
+        try { await window.storage.set(KEY, JSON.stringify(d)); } catch (e) { /* retry next open */ }
+      }
       setData(d);
       setLoaded(true);
     })();
@@ -344,11 +395,22 @@ function TravelPlanner() {
   const feed = useMemo(() => {
     const items = [];
     for (const t of data.trips) {
-      if (t.start) items.push({ date: t.start, icon: "🧳", title: `${t.name} begins`, sub: t.destination, tripId: t.id });
+      if (t.planOnly && t.start) items.push({ date: t.start, icon: "🧳", title: `${t.name} begins`, sub: t.destination, tripId: t.id });
+      const jmap = {};
       for (const tk of t.tickets || []) {
-        if (tk.date) items.push({
-          date: tk.date, time: tk.time, icon: TYPE_META[tk.type]?.icon || "🎫",
-          title: tk.title || TYPE_META[tk.type]?.label, sub: t.name, tripId: t.id,
+        if (!tk.date) continue;
+        const j = tk.journey === "onward" || tk.journey === "return" ? tk.journey : "leg:" + tk.id;
+        (jmap[j] = jmap[j] || []).push(tk);
+      }
+      for (const key of Object.keys(jmap)) {
+        const legs = jmap[key].sort((a, b) => ((a.date || "") + (a.time || "")).localeCompare((b.date || "") + (b.time || "")));
+        const first = legs[0], last = legs[legs.length - 1];
+        const single = key.indexOf("leg:") === 0;
+        items.push({
+          date: first.date, time: first.time,
+          icon: single ? (TYPE_META[first.type]?.icon || "🎫") : "🧭",
+          title: single ? (first.title || TYPE_META[first.type]?.label) : `${key === "onward" ? "Onward" : "Return"}: ${first.from} → ${last.to}`,
+          sub: t.name, tripId: t.id,
         });
       }
       for (const r of t.reminders || []) {
@@ -455,7 +517,7 @@ function TravelPlanner() {
           onAddTrip={() => setModal({ kind: "trip" })}
           calSynced={data.calSynced || []} calStatus={calStatus}
           onSyncCalendar={(events) => syncCalendar(events)}
-          onCreateWeekTrip={(mon) => createWeekTrip(mon)}
+          onPlanWeek={(mon) => setModal({ kind: "plan", mon })}
           deskSeat={(data.settings && data.settings.deskSeat) || "233"}
         />
       )}
@@ -503,6 +565,29 @@ function TravelPlanner() {
         />
       )}
 
+      {sharedFile && (
+        <div className="overlay" onClick={() => setSharedFile(null)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-head">
+              <h3>📥 Ticket received — attach to which journey?</h3>
+              <button className="x" onClick={() => setSharedFile(null)}>✕</button>
+            </div>
+            {data.trips.flatMap((t) => (t.tickets || [])
+              .filter((tk) => !tk.date || daysUntil(tk.date) >= -1)
+              .map((tk) => (
+                <button key={tk.id} className="feed-row" onClick={() => attachShared(t.id, tk)}>
+                  <span className="feed-icon">{TYPE_META[tk.type]?.icon || "🎫"}</span>
+                  <span className="feed-main">
+                    <span className="feed-title">{tk.title}</span>
+                    <span className="feed-sub">{t.name}{tk.date ? " · " + fmtDate(tk.date) : ""}</span>
+                  </span>
+                </button>
+              )))}
+            <p className="hint">The file will be saved as that ticket's copy and marked 📎 archived.</p>
+          </div>
+        </div>
+      )}
+
       {viewImg && (
         <div className="overlay img-overlay" onClick={() => setViewImg(null)}>
           <div className="img-sheet" onClick={(e) => e.stopPropagation()}>
@@ -523,6 +608,10 @@ function TravelPlanner() {
         <TicketForm edit={modal.edit} onClose={() => setModal(null)}
           onSave={(form) => saveTicket(modal.tripId, form, modal.edit?.id)} />
       )}
+      {modal?.kind === "plan" && (
+        <PlanForm mon={modal.mon} onClose={() => setModal(null)}
+          onSave={(out, back) => createPlannedTrip(out, back)} />
+      )}
       {modal?.kind === "reminder" && (
         <ReminderForm onClose={() => setModal(null)}
           onSave={(form) => saveReminder(modal.tripId, form)} />
@@ -533,7 +622,7 @@ function TravelPlanner() {
 
 /* ---------------- Screens ---------------- */
 
-function HomeScreen({ trips, feed, openTrip, onAddTrip, calSynced, calStatus, onSyncCalendar, onCreateWeekTrip, deskSeat }) {
+function HomeScreen({ trips, feed, openTrip, onAddTrip, calSynced, calStatus, onSyncCalendar, onPlanWeek, deskSeat }) {
   const [view, setView] = useState("list");
   const upcoming = trips.filter((t) => !t.end || daysUntil(t.end) >= 0);
   const past = trips.filter((t) => t.end && daysUntil(t.end) < 0);
@@ -588,8 +677,9 @@ function HomeScreen({ trips, feed, openTrip, onAddTrip, calSynced, calStatus, on
   return (
     <>
       <header className="masthead">
-        <div className="eyebrow">Your travel desk</div>
-        <h1>Journey<span className="accent">Log</span></h1>
+        <div className="eyebrow">✈ Your travel desk</div>
+        <h1>Avi<span className="accent">Yatra</span></h1>
+        <div className="route-line">BHL ─·─── AHM ───·─ BLR</div>
       </header>
 
       <nav className="tabs">
@@ -600,7 +690,7 @@ function HomeScreen({ trips, feed, openTrip, onAddTrip, calSynced, calStatus, on
 
       {view === "calendar" && <CalendarView trips={trips} openTrip={openTrip} />}
 
-      {view === "plan" && <PlanView trips={trips} openTrip={openTrip} onCreateWeekTrip={onCreateWeekTrip} />}
+      {view === "plan" && <PlanView trips={trips} openTrip={openTrip} onPlanWeek={onPlanWeek} />}
 
       {view === "list" && calEvents.length > 0 && (
         <section>
@@ -656,7 +746,7 @@ function HomeScreen({ trips, feed, openTrip, onAddTrip, calSynced, calStatus, on
               </button>
             );
           })}
-          {toArchive.length > 0 && <div className="section-label" style={{ marginTop: 12 }}>📎 Ticket copies to save</div>}
+          {toArchive.length > 0 && <div className="section-label" style={{ marginTop: 12 }}>📎 Upload ticket pending</div>}
           {toArchive.map((tk) => (
             <button key={tk.id} className="feed-row" onClick={() => openTrip(tk.tripId)}>
               <span className="feed-icon">{TYPE_META[tk.type]?.icon || "🎫"}</span>
@@ -767,6 +857,36 @@ async function compressImage(file) {
   c.height = Math.round(img.height * scale);
   c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
   return c.toDataURL("image/jpeg", 0.85);
+}
+
+function loadPdfJs() {
+  if (window.pdfjsLib) return Promise.resolve();
+  return new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    s.onload = () => {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+      res();
+    };
+    s.onerror = () => rej(new Error("pdf.js load failed"));
+    document.head.appendChild(s);
+  });
+}
+
+async function fileToDataUrl(file) {
+  if (file && file.type === "application/pdf") {
+    await loadPdfJs();
+    const buf = await file.arrayBuffer();
+    const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
+    const page = await pdf.getPage(1);
+    const vp = page.getViewport({ scale: 2 });
+    const c = document.createElement("canvas");
+    c.width = vp.width;
+    c.height = vp.height;
+    await page.render({ canvasContext: c.getContext("2d"), viewport: vp }).promise;
+    return c.toDataURL("image/jpeg", 0.9);
+  }
+  return compressImage(file);
 }
 
 function CalendarView({ trips, openTrip }) {
@@ -936,10 +1056,10 @@ function CalendarView({ trips, openTrip }) {
   );
 }
 
-function PlanView({ trips, openTrip, onCreateWeekTrip }) {
+function PlanView({ trips, openTrip, onPlanWeek }) {
   const startMon = mondayOf(todayStr());
   const weeks = [];
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 52; i++) {
     const mon = shiftDays(startMon, i * 7);
     const fri = shiftDays(mon, 4);
     const weekDates = [0, 1, 2, 3, 4].map((n) => shiftDays(mon, n));
@@ -950,7 +1070,7 @@ function PlanView({ trips, openTrip, onCreateWeekTrip }) {
   }
   return (
     <section>
-      <p className="hint" style={{ marginBottom: 12 }}>Next 20 weeks. Plan office weeks in advance so flights are booked ~1 month early (before fares rise). Weeks with holidays are flagged — consider a WFH exemption instead of being stuck in Bengaluru on a holiday.</p>
+      <p className="hint" style={{ marginBottom: 12 }}>Full year ahead (52 weeks). Tap + Plan on a free week, set your travel-out and return dates (any span) — legs and 3 office days per week are created automatically, with book-by alarms ~1 month early for flights. Holiday weeks suggest WFH instead.</p>
       {weeks.map((w) => (
         <div key={w.mon} className={"feed-row static" + (w.hols.length && !w.trip ? " warn-row" : "")}>
           <span className="feed-icon">{w.trip ? "✅" : w.hols.length ? "🎉" : "🧳"}</span>
@@ -966,7 +1086,7 @@ function PlanView({ trips, openTrip, onCreateWeekTrip }) {
           {w.trip
             ? <button className="btn-ghost small" onClick={() => openTrip(w.trip.id)}>Open</button>
             : !w.hols.length && <button className="btn-accent" style={{ padding: "6px 10px", fontSize: 12 }}
-                onClick={() => { if (confirm(`Plan a BLR office week for ${fmtDate(w.mon)} – ${fmtDate(w.fri)}? Creates bus + flight legs (pending) with book-by reminders, and 3 office days.`)) onCreateWeekTrip(w.mon); }}>+ Plan</button>}
+                onClick={() => onPlanWeek(w.mon)}>+ Plan</button>}
         </div>
       ))}
     </section>
@@ -994,6 +1114,7 @@ function TripScreen(p) {
   const { trip, tab, setTab } = p;
   const [checkText, setCheckText] = useState("");
   const [officeDate, setOfficeDate] = useState("");
+  const [openJ, setOpenJ] = useState({});
   const tickets = [...(trip.tickets || [])].sort((a, b) => ((a.date || "") + (a.time || "")).localeCompare((b.date || "") + (b.time || "")));
   const reminders = [...(trip.reminders || [])].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
   const officeDays = [...(trip.officeDays || [])].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
@@ -1029,14 +1150,57 @@ function TripScreen(p) {
         <section>
           <button className="btn-accent full" onClick={p.onAddTicket}>+ Add ticket</button>
           {tickets.length === 0 && <div className="empty"><div className="empty-icon">🎫</div><p>Save your flight, train, bus and hotel bookings here — PNR, seat, timings — so everything's in one place.</p></div>}
-          {tickets.map((tk) => (
-            <Ticket key={tk.id} tk={tk} onEdit={() => p.onEditTicket(tk)}
-              onUpload={(file, kind) => p.onUploadImage(tk, file, kind)}
-              onView={(kind) => p.onViewImage(tk, kind)}
-              onRemoveImg={(kind) => p.onRemoveImage(tk, kind)}
-              onCheckFare={() => p.onCheckFare(tk)}
-              onDelete={() => { if (confirm("Delete this ticket?")) p.onDeleteTicket(tk.id); }} />
-          ))}
+          {(() => {
+            const groups = { onward: [], return: [], other: [] };
+            for (const tk of tickets) groups[tk.journey === "onward" ? "onward" : tk.journey === "return" ? "return" : "other"].push(tk);
+            const journeyCard = (jkey, label) => {
+              const legs = groups[jkey];
+              if (!legs.length) return null;
+              const first = legs[0], last = legs[legs.length - 1];
+              const pending = legs.filter((x) => x.status === "pending").length;
+              const noCopy = legs.filter((x) => x.status !== "pending" && !x.archived).length;
+              const isOpen = !!openJ[jkey];
+              return (
+                <div key={jkey}>
+                  <button className={"journey-head" + (pending ? " warn-row" : "")} onClick={() => setOpenJ({ ...openJ, [jkey]: !isOpen })}>
+                    <span className="feed-icon">🧭</span>
+                    <span className="feed-main">
+                      <span className="feed-title">{first.from} → {last.to}</span>
+                      <span className="feed-sub">{label} · {legs.length} leg{legs.length > 1 ? "s" : ""} via {first.to} · {fmtDate(first.date)}{last.date !== first.date ? " – " + fmtDate(last.date) : ""}</span>
+                    </span>
+                    {pending > 0
+                      ? <span className="badge badge-warn">{pending} to book</span>
+                      : noCopy > 0
+                        ? <span className="badge badge-amber">📎 {noCopy} pending</span>
+                        : <span className="badge badge-ok">All set ✓</span>}
+                    <span className="chev">{isOpen ? "▾" : "▸"}</span>
+                  </button>
+                  {isOpen && legs.map((tk) => (
+                    <Ticket key={tk.id} tk={tk} onEdit={() => p.onEditTicket(tk)}
+                      onUpload={(file, kind) => p.onUploadImage(tk, file, kind)}
+                      onView={(kind) => p.onViewImage(tk, kind)}
+                      onRemoveImg={(kind) => p.onRemoveImage(tk, kind)}
+                      onCheckFare={() => p.onCheckFare(tk)}
+                      onDelete={() => { if (confirm("Delete this ticket?")) p.onDeleteTicket(tk.id); }} />
+                  ))}
+                </div>
+              );
+            };
+            return (
+              <>
+                {journeyCard("onward", "Onward")}
+                {journeyCard("return", "Return")}
+                {groups.other.map((tk) => (
+                  <Ticket key={tk.id} tk={tk} onEdit={() => p.onEditTicket(tk)}
+                    onUpload={(file, kind) => p.onUploadImage(tk, file, kind)}
+                    onView={(kind) => p.onViewImage(tk, kind)}
+                    onRemoveImg={(kind) => p.onRemoveImage(tk, kind)}
+                    onCheckFare={() => p.onCheckFare(tk)}
+                    onDelete={() => { if (confirm("Delete this ticket?")) p.onDeleteTicket(tk.id); }} />
+                ))}
+              </>
+            );
+          })()}
         </section>
       )}
 
@@ -1128,7 +1292,7 @@ function Ticket({ tk, onEdit, onDelete, onUpload, onView, onRemoveImg, onCheckFa
   ) : (
     <label className="btn-upload">
       {labelUp}
-      <input type="file" accept="image/*" style={{ display: "none" }}
+      <input type="file" accept="image/*,application/pdf" style={{ display: "none" }}
         onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) onUpload(f, kind); e.target.value = ""; }} />
     </label>
   );
@@ -1212,6 +1376,7 @@ function TicketForm({ edit, onSave, onClose }) {
     type: edit?.type || "flight", title: edit?.title || "", from: edit?.from || "", to: edit?.to || "",
     date: edit?.date || todayStr(), time: edit?.time || "", ref: edit?.ref || "", seat: edit?.seat || "", notes: edit?.notes || "",
     status: edit?.status || "booked", bookOpen: edit?.bookOpen || "", archived: edit?.archived || false, fileRef: edit?.fileRef || "",
+    journey: edit?.journey || "onward",
   });
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const isHotel = f.type === "hotel";
@@ -1239,6 +1404,12 @@ function TicketForm({ edit, onSave, onClose }) {
       <div className="two">
         <div><label className="fl">PNR / Booking ref</label><input value={f.ref} onChange={set("ref")} placeholder="e.g. ABC123" /></div>
         <div><label className="fl">{isHotel ? "Room" : "Seat / Coach"}</label><input value={f.seat} onChange={set("seat")} placeholder={isHotel ? "e.g. 204" : "e.g. 14A / B2-32"} /></div>
+      </div>
+      <label className="fl">Part of which journey?</label>
+      <div className="type-picker">
+        <button className={"type-chip" + (f.journey === "onward" ? " on" : "")} onClick={() => setF({ ...f, journey: "onward" })}>Onward (BHL → BLR)</button>
+        <button className={"type-chip" + (f.journey === "return" ? " on" : "")} onClick={() => setF({ ...f, journey: "return" })}>Return (BLR → BHL)</button>
+        <button className={"type-chip" + (f.journey !== "onward" && f.journey !== "return" ? " on" : "")} onClick={() => setF({ ...f, journey: "" })}>Standalone</button>
       </div>
       <label className="fl">Booking status</label>
       <div className="type-picker">
@@ -1276,6 +1447,20 @@ function TicketForm({ edit, onSave, onClose }) {
   );
 }
 
+function PlanForm({ mon, onSave, onClose }) {
+  const [f, setF] = useState({ out: mon, back: shiftDays(mon, 9) });
+  return (
+    <Modal title="Plan a BLR trip" onClose={onClose}>
+      <div className="two">
+        <div><label className="fl">Travel out (BHL → AHM)</label><input type="date" value={f.out} onChange={(e) => setF({ ...f, out: e.target.value })} /></div>
+        <div><label className="fl">Return (back in BHL)</label><input type="date" value={f.back} onChange={(e) => setF({ ...f, back: e.target.value })} /></div>
+      </div>
+      <p className="hint">Creates all 4 legs (bus + flight each way, pending, with book-by alarms: flights ~30 days ahead, buses ~15) and 3 office days (Tue–Thu) in every week of your stay — holidays skipped. You can adjust everything afterwards.</p>
+      <button className="btn-accent full" disabled={!f.out || !f.back} onClick={() => onSave(f.out, f.back)}>Create trip</button>
+    </Modal>
+  );
+}
+
 function ReminderForm({ onSave, onClose }) {
   const [f, setF] = useState({ text: "", date: todayStr() });
   return (
@@ -1305,7 +1490,12 @@ function Style() {
       }
       * { box-sizing: border-box; margin: 0; }
       .app {
-        min-height: 100vh; background: var(--bg); color: var(--text);
+        min-height: 100vh; color: var(--text);
+        background:
+          radial-gradient(1100px 480px at 85% -8%, rgba(245,165,36,0.09), transparent 60%),
+          radial-gradient(900px 520px at -12% 108%, rgba(127,184,255,0.07), transparent 60%),
+          url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cpath d='M0 210 Q 150 130 300 190' fill='none' stroke='rgba(255,255,255,0.05)' stroke-width='1.5' stroke-dasharray='2 8'/%3E%3Cpath d='M20 70 Q 160 20 290 100' fill='none' stroke='rgba(255,255,255,0.04)' stroke-width='1.5' stroke-dasharray='2 8'/%3E%3Cpath d='M46 40 l18 -8 -12 12 2 6 z' fill='rgba(245,165,36,0.14)'/%3E%3Cpath d='M238 176 l18 -8 -12 12 2 6 z' fill='rgba(127,184,255,0.12)'/%3E%3Ccircle cx='70' cy='245' r='1.5' fill='rgba(255,255,255,0.10)'/%3E%3Ccircle cx='215' cy='58' r='1.3' fill='rgba(255,255,255,0.09)'/%3E%3Ccircle cx='130' cy='150' r='1.2' fill='rgba(255,255,255,0.07)'/%3E%3Ccircle cx='285' cy='265' r='1.4' fill='rgba(255,255,255,0.08)'/%3E%3C/svg%3E") repeat,
+          var(--bg);
         font-family: 'IBM Plex Sans', system-ui, sans-serif;
         max-width: 460px; margin: 0 auto; padding: 16px 16px 48px;
       }
@@ -1315,6 +1505,7 @@ function Style() {
 
       .masthead { padding: 8px 0 18px; }
       .eyebrow { font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--mut); margin-bottom: 4px; }
+      .route-line { font-size: 11px; letter-spacing: .08em; color: var(--mut); margin-top: 6px; opacity: .8; }
       h1 { font-size: 30px; letter-spacing: -0.02em; }
       .accent { color: var(--accent); }
 
@@ -1473,6 +1664,12 @@ function Style() {
         margin-bottom: 10px; letter-spacing: -0.01em; }
       .panel .section-label { margin-bottom: 8px; }
       .panel .hint { margin-bottom: 8px; }
+
+      .journey-head { display: flex; gap: 10px; align-items: center; width: 100%; text-align: left;
+        background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+        padding: 12px; margin-bottom: 8px; color: var(--text); cursor: pointer; font-family: inherit; }
+      .journey-head .feed-title { font-size: 16px; font-family: 'Space Grotesk', system-ui, sans-serif; }
+      .chev { color: var(--mut); font-size: 14px; }
 
       button { -webkit-tap-highlight-color: transparent; }
       .sheet .btn-accent.full { margin-top: 16px; margin-bottom: 0; }
